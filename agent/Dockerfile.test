@@ -1,0 +1,18 @@
+# Test Dockerfile for agent
+FROM golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816
+
+WORKDIR /app
+
+# Install necessary build tools
+RUN apk add --no-cache git make
+
+# Copy go.mod and go.sum first to leverage Docker caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the rest of the application code
+COPY . .
+
+# Default command runs tests
+CMD ["go", "test", "-v", "./..."]
+

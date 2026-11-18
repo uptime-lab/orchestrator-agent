@@ -1,0 +1,957 @@
+syntax = "proto3";
+
+package orchestrator;
+option go_package = "github.com/uptime-lab/orchestrator/proto;orchestrator";
+
+// NodeToPlatform messages sent from agent to backend
+message NodeToPlatform {
+  string node_id = 1;
+  string account_id = 2;
+  string unique_token = 3;
+  
+  oneof payload {
+    ConnectionInit connection = 4;
+    Heartbeat heartbeat = 5;
+    StatusUpdate status_update = 6;
+    SystemInfoUpdate system_info_update = 7;
+    FileChangedEvent file_changed_event = 8;
+    CommandStatusUpdate command_status_update = 9;
+    MetricsUpdate metrics_update = 10;
+    TerminalOutput terminal_output = 11;
+    TerminalClosed terminal_closed = 12;
+    NodeEvent node_event = 13;
+  }
+}
+
+// NodeEvent is a spontaneous, agent-initiated fact — the first platform-bound
+// message that is neither a reply to a command nor a periodic report. Like
+// MetricsUpdate it is meaningless replayed, so the agent drops it when not
+// connected rather than queueing it. The agent debounces and rate-limits at
+// the source (hardware in a human's hand); the platform rate-limits again and
+// never trusts the timestamp for anything but display.
+message NodeEvent {
+  string event_type = 1; // "button_press" is the only type today
+  // press_kind reserves long/double-press semantics as an ADDITION rather
+  // than a protocol change: "short" today.
+  string press_kind = 2;
+  int64 ts = 3; // agent clock, unix seconds
+}
+
+// MetricsUpdate carries a periodic sample of live resource utilization. Unlike
+// SystemInfoUpdate (static facts, sent once), this is sampled on a timer and is
+// meaningless if replayed, so the agent drops it when not connected rather than
+// queueing it.
+message MetricsUpdate {
+  int64 timestamp = 1;                       // Unix seconds when sampled
+  double cpu_percent = 2;                    // Aggregate CPU usage 0-100
+  repeated double cpu_percent_per_core = 3;  // Per-core usage 0-100 (optional)
+  uint64 mem_total_bytes = 4;
+  uint64 mem_used_bytes = 5;
+  uint64 mem_available_bytes = 6;
+  double load_avg_1 = 7;
+  double load_avg_5 = 8;
+  double load_avg_15 = 9;
+  repeated ThermalZone thermal = 10;         // May be empty (e.g. x86 without sensors)
+}
+
+message ThermalZone {
+  string name = 1;          // e.g. "cpu-thermal"
+  double temp_celsius = 2;
+}
+
+message ConnectionInit {
+  HardwareFingerprint fingerprint = 1;
+  string agent_version = 2;
+  // agent_kind declares what this agent IS: "" or "full" = the managing agent,
+  // "watcher" = the telemetry-only binary that carries no command-execution
+  // code at all. The platform records it and refuses to dispatch
+  // commands to a watcher — belt (the binary cannot execute) and suspenders
+  // (the platform does not send). Old agents send nothing, which is "full".
+  // The retired value "observer" (0.6.x, pre-rename, never deployed) is
+  // normalized to "watcher" on receipt and must not be reused.
+  string agent_kind = 3;
+  // agent_instance_id identifies the agent PROCESS, not the node: a fresh
+  // random id per process start, stable across every reconnect that process
+  // makes. It is what lets the platform tell "the stream blipped" (same id —
+  // the process is still holding its in_progress commands and will report
+  // them) from "the agent restarted" (different id — that work is gone and can
+  // be failed immediately instead of after a grace period). Old agents send
+  // nothing, which the platform treats as "unknown" and falls back to the
+  // grace-period heuristic.
+  string agent_instance_id = 4;
+  // led_sources advertises the ambient-indication metric sources this agent
+  // can render (LED v2): e.g. temperature, load, ram, disk. The UI offers
+  // exactly what the node can render and the platform never hand-tracks agent
+  // capabilities. Old agents send nothing, which the platform treats as the
+  // v1 pair (temperature, load).
+  repeated string led_sources = 5;
+}
+
+message Heartbeat {
+  uint64 sequence_number = 1;
+  int64 timestamp = 2;
+}
+
+message StatusUpdate {
+  string status = 1;  // "online", "restarting", "shutting_down", "busy"
+  string message = 2;  // Optional context
+  int64 timestamp = 3;
+}
+
+message SystemInfoUpdate {
+  map<string, StorageDevice> storage_devices = 1;  // key: device path (e.g., "/dev/sda"), value: storage device metadata
+  NetworkInfo network = 2;
+  HardwareInfo hardware = 3;
+  OSInfo os = 4;
+}
+
+message NetworkInfo {
+  string ip = 1;        // Primary IP address
+  string hostname = 2; // System hostname
+}
+
+message HardwareInfo {
+  CPUInfo cpu = 1;    // CPU information
+  RAMInfo ram = 2;    // RAM information
+  TPMInfo tpm = 3;    // TPM (Trusted Platform Module) information
+  BootInfo boot = 4;   // Boot information (current device + order)
+  EEPROMInfo eeprom = 5;  // EEPROM information (Raspberry Pi only)
+  PowerInfo power = 6;  // Power/thermal throttling (Raspberry Pi only); ABSENT, not zeroed, where vcgencmd cannot answer
+  repeated USBDevice usb = 7;  // Attached USB devices that are NOT storage; empty where the bus cannot be read
+  HatInfo hat = 8;    // Spec-compliant HAT ID EEPROM, read from /proc/device-tree/hat; ABSENT when no HAT is present
+}
+
+// HatInfo carries the Raspberry Pi HAT specification's ID EEPROM fields as the
+// firmware exposed them in /proc/device-tree/hat. Sent RAW and interpreted on
+// the platform (the board-revision canon): the vendor programs these strings,
+// so the platform truncates and sanitizes, not the agent.
+message HatInfo {
+  string vendor = 1;
+  string product = 2;
+  string product_id = 3;
+  string product_ver = 4;
+  string uuid = 5;
+}
+
+// USBDevice is one thing plugged into a USB port — a Wi-Fi dongle, a CAN or
+// serial adapter, a HAT that presents over USB, a hub.
+//
+// Storage is deliberately NOT here: a USB disk is already a StorageDevice, and
+// listing it twice would invite an operator to reason about two records for one
+// object. This answers the question storage cannot: "what else is attached?"
+//
+// Read from /sys/bus/usb/devices, so it costs a directory walk and no commands.
+message USBDevice {
+  string vendor_id = 1;     // 4 hex digits, e.g. "0781"
+  string product_id = 2;    // 4 hex digits, e.g. "55a9"
+  string manufacturer = 3;  // as the device reports it; often empty
+  string product = 4;       // as the device reports it; often empty
+  // USB class of the device or its first interface, decoded on the platform for
+  // the same reason board_revision is: the table is USB-IF's, not ours.
+  uint32 class_code = 5;
+  string speed = 6;         // as the kernel reports it, e.g. "480", "5000" (Mbit/s)
+  // Bus path ("1-1.3"), which is what identifies a physical port. Two identical
+  // dongles are otherwise indistinguishable.
+  string port = 7;
+}
+
+// PowerInfo reports the SoC's power and thermal throttling state from
+// `vcgencmd get_throttled`. Under-voltage is the classic Raspberry Pi failure
+// mode, and it silently corrupts installs and captures rather than failing them
+// cleanly: a node powered from a computer's USB port browned out, its USB disk
+// stopped answering, and the platform showed a wipefs internal that pointed at
+// the disk while holding the deciding signal nowhere.
+//
+// The message is absent (not zero) on anything that cannot answer: no vcgencmd
+// must mean no facts rather than a claim that all is well.
+message PowerInfo {
+  // Raw `vcgencmd get_throttled` bitmask (e.g. 0x50000 = under-voltage has
+  // occurred + throttling has occurred). Bits 0-3 are "right now", bits 16-19
+  // are "has occurred since boot" and are sticky until reboot.
+  //
+  // Sent RAW and decoded on the platform, the same reasoning as
+  // CPUInfo.board_revision: the bit assignments belong to Raspberry Pi's
+  // firmware, so a new bit should become readable with a backend deploy rather
+  // than a fleet-wide agent roll.
+  uint32 throttled_flags = 1;
+}
+
+message BootInfo {
+  string current_boot_device = 1;        // Current boot device: "sd", "usb", "nvme", "http", or empty if unknown
+  repeated string boot_devices_order = 2; // Boot order array: ["nvme", "sd", "usb", "restart"]
+  int64 booted_at = 3;  // Unix timestamp (seconds since epoch) when the system booted
+  int64 uptime_seconds = 4;  // Seconds since boot (from /proc/uptime); clock-independent, reliable on RTC-less/netbooted devices
+  string boot_http_host = 5;  // EEPROM-baked HTTP_HOST (the netboot server this device fetches from); lets the platform detect a device still pointing at a different install
+  string bootloader_version = 6;  // Running EEPROM firmware version/build id (e.g. vcgencmd bootloader_version first line); agent-reported so it works on NAT'd/steady-state nodes that never HTTP-boot
+  int64 bootloader_timestamp = 7;  // Running EEPROM firmware build date as a Unix timestamp (0 if unknown); the build date, not the flash time
+  // True when the agent is running inside the netboot/SD recovery bootstrap
+  // (a RAM-backed root) rather than an installed OS. current_boot_device cannot
+  // answer this: the SAME bootstrap reports "http" when netbooted and "sd" when
+  // booted from a provisioning card, and commands that need a managed OS must be
+  // held in both cases.
+  bool recovery_bootstrap = 8;
+  // Whole-disk device the running system booted from ("/dev/nvme0n1"), or empty
+  // when there is none to name — which is the recovery bootstrap's normal case,
+  // because its root is RAM.
+  //
+  // current_boot_device cannot substitute: it is a CLASS from the ROM boot-mode
+  // byte, so it cannot pick between two devices of the same kind. eMMC plus an
+  // inserted SD card are both `mmcblk*`, which is exactly the ambiguity that
+  // makes an operator wipe the wrong medium — the UI marks nothing there rather
+  // than guess. This makes the boot marker a fact.
+  string root_device = 9;
+  // How the root filesystem persists writes: "persistent" (an installed OS on
+  // real storage), "overlay" (an overlayfs/overlayroot upper layer — writes
+  // land in tmpfs and EVAPORATE at reboot), or "" from an agent that predates
+  // the field. Three values on purpose: proto3's default false would make
+  // "not overlay" and "never reported" the same fact, and the platform gates
+  // write-shaped dispatch on THIS — a config apply, a key revocation or an
+  // agent update written into an overlay upper layer reads as applied and is
+  // gone at the next boot, with the recorded applied hash then SUPPRESSING the
+  // re-apply.
+  string root_persistence = 10;
+  // EEPROM-baked HTTP_PATH (the per-serial boot path this device fetches
+  // from), read back by the agent from the RUNNING EEPROM. The phase-2
+  // httpboot design (docs/HTTPBOOT-AUTH-RESEARCH.md) enforces a per-device
+  // path secret only after THIS readback confirms the flash actually carried
+  // it — a dispatch's success says the command ran, not what the ROM now
+  // holds. Empty = unknown / not a Pi / no HTTP_PATH configured.
+  string boot_http_path = 11;
+}
+
+message EEPROMInfo {
+  bool enabled = 1;  // Whether EEPROM updates are enabled
+  string description = 2;  // Additional info (e.g., "CM4 EEPROM updates enabled")
+}
+
+message CPUInfo {
+  string model = 1;    // CPU model name
+  string vendor = 2;   // CPU vendor (e.g., "Intel", "AMD", "ARM")
+  uint32 cores = 3;    // Number of CPU cores
+  string info = 4;     // Additional CPU information (architecture, features, etc.)
+  // Raw Raspberry Pi board revision code from /proc/cpuinfo "Revision"
+  // (e.g. "c04170"), empty on non-Pi hardware. Sent RAW and decoded on the
+  // platform on purpose: the firmware writes it from OTP, so unlike `model`
+  // (a device-tree property) it survives a forced device_tree= in the recovery
+  // bootstrap, and keeping the type table on the platform means a new board can
+  // be recognised by a backend deploy instead of a fleet-wide agent roll.
+  string board_revision = 5;
+}
+
+message RAMInfo {
+  uint64 size = 1;     // Total RAM size in bytes
+}
+
+message TPMInfo {
+  bool present = 1;        // Whether TPM is present
+  string version = 2;      // TPM version (e.g., "2.0", "1.2") if available
+  string model = 3;        // TPM module model (e.g., "SLB9670") if available
+  string description = 4;  // TPM description/additional info if available
+}
+
+message OSInfo {
+  string version = 1;   // OS version
+  string details = 2;   // OS distribution details (e.g., "Ubuntu 22.04 LTS")
+}
+
+message StorageDevice {
+  string path = 1;              // Device path (e.g., "/dev/sda")
+  string label = 2;             // Human-readable label/name
+  string model = 3;             // Device model name
+  string vendor = 4;            // Device vendor/manufacturer
+  string serial = 5;            // Serial number
+  string device_type = 6;      // Device type: "ssd", "hdd", "nvme", "usb", etc.
+  uint64 total_capacity = 7;   // Total capacity in bytes
+  bool is_removable = 8;       // Whether the device is removable
+  bool is_read_only = 9;       // Whether the device is read-only
+  repeated StoragePartition partitions = 10; // Array of partitions on this device
+}
+
+message StoragePartition {
+  string partition_id = 1;      // Partition identifier (e.g., "/dev/sda1", "nvme0n1p1")
+  string mount_point = 2;       // Mount point (if mounted), empty if not mounted
+  string filesystem = 3;     // Filesystem type (e.g., "ext4", "xfs", "ntfs", "")
+  uint64 used_space = 4;       // Used space in bytes
+  uint64 available_space = 5;  // Available space in bytes
+}
+
+message HardwareFingerprint {
+  string mac_address = 1;
+  string hardware_serial = 2;
+}
+
+message CommandStatusUpdate {
+  string command_id = 1;  // UUID from Command.command_id (same as command domain ID)
+  string status = 2;      // "in_progress", "success", "failed"
+  int32 progress = 3;     // 0-100 (optional, -1 means not applicable)
+  string details = 4;     // Optional additional information (error messages, logs, etc.)
+  int64 timestamp = 5;
+  map<string, string> result = 6;  // Structured outputs for workflow blocks (read_file/run_script/...)
+}
+
+// PlatformToNode messages sent from backend to agent
+message PlatformToNode {
+  oneof payload {
+    Command command = 1;
+    TerminalOpen terminal_open = 2;
+    TerminalInput terminal_input = 3;
+    TerminalClose terminal_close = 4;
+    IdentityAssignment identity_assignment = 5;
+  }
+}
+
+// IdentityAssignment hands a master-token-adopted node its OWN credentials, so
+// it stops depending on the shared enrolment token for the rest of its life.
+//
+// Why this exists: without it, an agent in master-token mode sends that master
+// token on every single connect, forever, and the platform never tells it who
+// it is. The master token's whole purpose is to be short-lived and shared —
+// so its expiry became the expiry of every device adopted with it. When one
+// expired, the node went offline permanently and could not
+// be recovered remotely (the platform cannot command a node it cannot
+// authenticate); the fix was physical access to rewrite the adoption file.
+// Revoking a shared bootstrap token had the same effect on every node ever
+// adopted with it, which is the opposite of what revoking it is for.
+//
+// The platform sends this once, immediately after a successful master-token
+// handshake. The agent persists it and uses node-specific mode from then on, so
+// the master token is needed exactly once: at enrolment, which is what it was
+// always meant to be.
+message IdentityAssignment {
+  string node_id = 1;
+  string account_id = 2;
+  string unique_token = 3;
+}
+
+// ===== Interactive terminal channel =====
+// A browser terminal is bridged to the device over this existing stream. The
+// backend mints session_id and correlates all frames of one session by it; a
+// node can host several concurrent sessions.
+message TerminalOpen {
+  string session_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+  string mode = 4; // "shell" (login shell) — reserved for future "ssh" mode
+}
+
+message TerminalInput {
+  string session_id = 1;
+  bytes data = 2;      // keystrokes (ignored when is_resize)
+  uint32 cols = 3;     // window size (used when is_resize)
+  uint32 rows = 4;
+  bool is_resize = 5;
+}
+
+message TerminalClose {
+  string session_id = 1;
+}
+
+message TerminalOutput {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message TerminalClosed {
+  string session_id = 1;
+  int32 exit_code = 2;
+  string error = 3;
+}
+
+message Command {
+  string command_id = 1;  // UUID for logging/tracking
+  int64 issued_at = 2;
+  
+  oneof command_type {
+    ShutdownCommand shutdown = 3;
+    RestartCommand restart = 4;
+    StatusCheckCommand status_check = 5;
+    InstallOSCommand install_os = 6;
+    UpdateFileCommand update_file = 7;
+    UpdateBootOrderCommand update_boot_order = 8;
+    InstallAgentOnVolumeCommand install_agent_on_volume = 9;
+    ProvisionConnectionCommand provision_connection = 10;
+    EnableEEPROMCommand enable_eeprom = 11;
+    EraseDriveCommand erase_drive = 12;
+    UpdateAgentCommand update_agent = 13;
+    SetHostnameCommand set_hostname = 14;
+    PatchFileCommand patch_file = 15;
+    ReadFileCommand read_file = 16;
+    WaitForFileCommand wait_for_file = 17;
+    RunScriptCommand run_script = 18;
+    ApplyAccessConfigCommand apply_access_config = 19;
+    CaptureImageCommand capture_image = 20;
+    InstallPackagesCommand install_packages = 21;
+    ManageServiceCommand manage_service = 22;
+    DownloadFileCommand download_file = 23;
+    WriteFileCommand write_file = 24;
+    ApplyWatchdogConfigCommand apply_watchdog_config = 25;
+    DeleteFileCommand delete_file = 26;
+    ReleaseIdentityCommand release_identity = 27;
+    IdentifyCommand identify = 28;
+    ApplyDeviceProfileCommand apply_device_profile = 29;
+    ApplyAccessConfigOfflineCommand apply_access_config_offline = 30;
+    PatchFileOfflineCommand patch_file_offline = 31;
+    ApplyUtilityConfigCommand apply_utility_config = 32;
+    ApplyLEDConfigCommand apply_led_config = 33;
+  }
+}
+
+// ApplyLEDConfigCommand declaratively converges the node's LED behaviour and
+// persists it agent-side so a reboot re-applies it without the platform.
+// Three independent knobs:
+//   - stealth_mode: Compute Blade only — GPIO 21 drives a transistor that
+//     cuts every LED except the digital chain (per the blade documentation),
+//     so identify keeps working through the digital LEDs.
+//   - act_led_off / pwr_led_off: any Pi — sysfs trigger=none + brightness=0.
+//     Identify still blinks a disabled ACT (its save/restore returns the LED
+//     to "off" afterwards, which is exactly the desired state).
+//   - digital_sources: per-LED ambient indication ("off" | "temperature" |
+//     "load") rendered by the agent every few seconds; an identify blink
+//     always preempts it and it resumes when the blink ends.
+// Idempotent through config_hash, which the settle records verbatim.
+message ApplyLEDConfigCommand {
+  string config_hash = 1;
+  bool stealth_mode = 2;
+  bool act_led_off = 3;
+  bool pwr_led_off = 4;
+  // One entry per digital LED, index = chain position. Empty = all off.
+  repeated string digital_sources = 5;
+  // Digital-chain wiring, from the node's device profile (blade: gpio 18).
+  int32 digital_gpio = 6;
+  // Stealth transistor GPIO (blade: 21). 0 = board has no stealth circuit;
+  // the agent refuses stealth_mode=true without it.
+  int32 stealth_gpio = 7;
+  // LED v2: per-LED parameterized indication. When present it is the source
+  // of truth and digital_sources above is the DERIVED v1 projection, kept so
+  // an older agent renders the same sources with its built-in defaults.
+  repeated DigitalLEDSpec digital_leds = 8;
+}
+
+// DigitalLEDSpec parameterizes one digital LED's ambient indication (LED v2).
+// Absent fields fall to the v1 defaults the agent has always used
+// (temperature 45..80 °C, load/ram/disk 0..100 %, brightness 20 %), so a
+// platform that sends only sources changes nothing.
+message DigitalLEDSpec {
+  string source = 1;     // off | temperature | load | ram | disk
+  double low = 2;        // gradient floor (green at or below)
+  double high = 3;       // gradient ceiling (red at or above)
+  uint32 brightness = 4; // percent 1..100; 0 = default (20)
+}
+
+// IdentifyCommand blinks the node's locate LED so a human can find the
+// physical machine in a rack. The agent starts the blink, reports terminal
+// SUCCESS immediately (a command held in_progress for the blink would pin the
+// node in `maintenance` for the whole duration), and stops on its own local
+// timer. A repeat command restarts the timer.
+message IdentifyCommand {
+  int32 duration_sec = 1; // how long to blink; agent clamps to a sane bound
+  // Rendering backend, chosen by the platform from the node's device profile:
+  // "sys-led" blinks a /sys/class/leds entry (works on any Pi via ACT);
+  // "neopixel" drives digital LEDs (falls back to sys-led until the agent
+  // ships a driver).
+  string backend = 2;
+  int32 gpio = 3;      // neopixel backend: data GPIO (blade: 18)
+  string color = 4;    // neopixel backend: blink color ("blue")
+  // stop=true ends a running blink instead of starting one. The platform
+  // still sends duration_sec=5 alongside: an agent that predates this field
+  // ignores it and renders the old "shortest legal identify IS the stop"
+  // 5-second blink instead of a fresh 30-second default.
+  bool stop = 5;
+}
+
+// ApplyDeviceProfileCommand applies a node's declared hardware equipage as ONE
+// command with one terminal status: write the device-profile managed block
+// into config.txt, then run the typed setup steps. Deliberately not
+// patch_file + run_script — those have opposite queueability, and one apply
+// must not be able to half-land on an offline node.
+message ApplyDeviceProfileCommand {
+  string path = 1;         // target file ("/boot/firmware/config.txt")
+  string marker = 2;       // managed block identifier ("device-profile")
+  string content = 3;      // block body, rendered and hashed by the platform
+  string content_hash = 4; // hash of content; echoed back so the settle
+                           // records what was DISPATCHED, not a later render
+  // Typed setup steps by kind (e.g. "rtc_hwclock"). The agent implements each
+  // natively and fails the command on a kind it does not know — a registry
+  // typo must surface, not silently skip.
+  repeated string setup_kinds = 5;
+  // button_gpio > 0 tells the agent this board has a physical button on that
+  // BCM line (the blade: 20). The agent persists it as local desired state
+  // and watches the line, reporting NodeEvent button presses. 0 = no button;
+  // the agent stops any running watcher.
+  int32 button_gpio = 6;
+  // The board's identify-LED spec, persisted alongside the button state so a
+  // button press can render its local ack on the DIGITAL LEDs too — the ack
+  // fires when the platform may be unreachable, so the agent cannot ask for
+  // the spec at press time. Same values the IdentifyCommand carries.
+  string identify_backend = 7;
+  int32 identify_gpio = 8;
+  string identify_color = 9;
+  // The account's identify blink duration, persisted with the button state so
+  // a physical press blinks exactly as long as a UI identify would. Stale
+  // until the next profile apply — acceptable for a cosmetic duration.
+  int32 identify_duration_sec = 10;
+}
+
+// CaptureImageCommand captures a disk image of the node's storage and streams
+// it zstd-compressed to the platform via the pre-signed upload URL. It must run
+// from the netboot recovery bootstrap: the captured filesystem has to be
+// unmounted so it can be fsck'd and shrunk to its minimal size first. With
+// generalize=true the machine identity (machine-id, SSH host keys, adoption
+// file, DHCP identity, hostname, logs) is stripped so the image becomes a
+// "golden" template deployable onto any device; with generalize=false it is a
+// byte-exact backup of this specific device. The source partition table and
+// filesystem are restored to their original size after the capture.
+message CaptureImageCommand {
+  string image_id = 1;       // UUID of the pre-created image record
+  string upload_url = 2;     // Pre-signed streaming PUT URL (HMAC capability)
+  string target_device = 3;  // Whole disk to capture (e.g. "/dev/nvme0n1")
+  bool generalize = 4;       // Strip machine identity (golden) vs keep it (backup)
+}
+
+// InstallPackagesCommand installs OS packages with the system package manager
+// (apt-get, non-interactive). Part of the software provisioning block family.
+message InstallPackagesCommand {
+  repeated string packages = 1; // Package names, optionally name=version
+  bool update = 2;              // Run apt-get update first
+}
+
+// ManageServiceCommand creates/updates and controls a systemd unit. When
+// unit_content is set, the unit file is written to /etc/systemd/system/<name>
+// (atomic write + daemon-reload) before the action runs.
+message ManageServiceCommand {
+  string name = 1;         // Unit name, e.g. "teamcity-agent.service"
+  string action = 2;       // enable_now|start|restart|stop|disable_now|status
+  string unit_content = 3; // Optional full unit file content
+}
+
+// DownloadFileCommand downloads a file over http(s) onto the node, optionally
+// verifying a SHA-256 checksum and unpacking tar archives.
+message DownloadFileCommand {
+  string url = 1;
+  string dest_path = 2;            // Target file path, or extraction dir when extract=true
+  string checksum = 3;             // Optional SHA-256 of the downloaded bytes
+  bool extract = 4;                // Unpack as tar (gz/xz/zst by extension) into dest_path
+  string mode = 5;                 // Optional octal file mode, e.g. "0755"
+  map<string, string> headers = 6; // Optional HTTP request headers (e.g. Authorization)
+  string owner = 7;                // Optional user[:group] for the file / extracted tree
+}
+
+// WriteFileCommand writes an arbitrary configuration file (atomic tmp+rename),
+// creating parent directories as needed. Unlike UpdateFileCommand (boot config
+// files only) it takes an explicit path, mode and owner.
+message WriteFileCommand {
+  string path = 1;
+  string content = 2; // Full file content (templates are resolved server-side)
+  string mode = 3;    // Optional octal mode, default "0644"
+  string owner = 4;   // Optional user[:group]
+  bool backup = 5;    // Keep a one-time <path>.orchestrator.bak before first write
+}
+
+// PasswordAction distinguishes leaving a user's password untouched from setting
+// or clearing it. An empty password string is otherwise indistinguishable from
+// "do not touch", which would silently wipe passwords on every reconcile.
+enum PasswordAction {
+  PASSWORD_ACTION_UNCHANGED = 0;
+  PASSWORD_ACTION_SET = 1;
+  PASSWORD_ACTION_CLEAR = 2;
+}
+
+// ApplyAccessConfigCommand declaratively reconciles the node's managed access:
+// a set of named OS users (each with a key set, sudo flag and optional password
+// action) and trusted external CAs. The agent validates everything up front,
+// then applies grant-before-revoke; if the resulting config would leave no
+// working login and password auth is off, it refuses with
+// would_lock_out_all_access and changes nothing. Passwords are resolved
+// server-side at build time and are never stored in the queued payload.
+message ApplyAccessConfigCommand {
+  string config_hash = 1;             // desired-state hash for the idempotent no-op check
+  bool manage_ssh_password_auth = 2;  // whether the agent should enforce ssh_password_auth
+  bool ssh_password_auth = 3;         // effective password-auth value when managed
+  repeated AccessUser users = 4;
+  repeated AccessCA cas = 5;
+}
+
+// ApplyAccessConfigOfflineCommand applies the SAME resolved access config as
+// ApplyAccessConfigCommand, but into a MOUNTED target rootfs from the recovery
+// bootstrap instead of the live system. The agent refuses it on an installed
+// OS (the live apply owns that case), mounts the target root partition, runs
+// the reconciler with rootPath = mountpoint (every mutation already goes
+// through `chroot rootPath <tool>`, using the TARGET's own shadow-suite
+// binaries), and unmounts. sshd is never reloaded — there is no daemon to
+// reload; the settings take effect when the installed OS boots.
+//
+// This is how OU-assigned credentials reach a node whose live-OS agent never
+// runs (the watcher-agent model): the disk holds the LAST written state, so a
+// later key rotation reaches such a node only on its next recovery pass.
+message ApplyAccessConfigOfflineCommand {
+  ApplyAccessConfigCommand config = 1; // the exact live-apply payload, reused whole
+  // target_device: empty = auto-detect, allowed only when exactly one candidate
+  // disk carries a detectable Linux root partition; ambiguity is refused, never
+  // guessed (multi-OS disks are the known open case).
+  string target_device = 2;
+  uint32 root_partition = 3; // 0 = auto-detect (largest ext4 that a fs probe accepts)
+}
+
+// PatchFileOfflineCommand edits a file on a node's INSTALLED system while the
+// node is running the netboot recovery bootstrap — the state a node is in
+// precisely when its installed system will not boot, which is when editing
+// /boot/firmware/config.txt is most wanted and least possible.
+//
+// The live patch_file writes to the path on the RUNNING root, so from recovery
+// it would patch the bootstrap's own copy: the wrong file, and one that
+// evaporates on the next boot. This command mounts the target instead and runs
+// the SAME managed-block edit against it.
+//
+// The path is the one the INSTALLED system sees. Which partition it lives on is
+// resolved from it, not asked for: /boot/firmware/... is the FAT boot
+// partition, everything else is the root partition. That distinction is not a
+// detail — mounting only the root gives an EMPTY /boot/firmware directory, so a
+// command that ignored it would "successfully" write config.txt into a
+// directory the firmware never reads.
+message PatchFileOfflineCommand {
+  string path = 1;    // path as the INSTALLED system sees it, e.g. "/boot/firmware/config.txt"
+  string content = 2; // lines to enforce inside the managed block
+  string marker = 3;  // block identifier (default "orchestrator")
+  // target_device: the whole disk to mount. Required — the platform resolves it
+  // from the node's reported storage inventory before dispatch, and the agent
+  // never guesses a disk it is about to write to.
+  string target_device = 4;
+  uint32 root_partition = 5; // 0 = auto-detect; ignored for a /boot/firmware path
+}
+
+// ApplyUtilityConfigCommand declaratively applies the node's resolved utility
+// set (docs/UTILITIES-PLAN.md) as ONE wholesale command with one terminal
+// status. Wholesale on purpose: per-utility dispatches would share a supersede
+// key (slug+node) and retire each other, the defect apply_device_profile's own
+// slug exists to avoid. The agent implements each utility_id natively (the
+// typed-steps doctrine — the registry never ships shell) and reports a
+// per-utility marker in the result map (utility.<id> = "applied" |
+// "failed: <reason>"), so one refused utility cannot clear converged siblings
+// at the settle.
+message ApplyUtilityConfigCommand {
+  // union_hash identifies the whole dispatched set — the supersede/display
+  // identity. Per-utility convergence is tracked by the per-utility hashes.
+  string union_hash = 1;
+  repeated UtilityDesired utilities = 2;
+}
+
+// UtilityDesired is one utility of the dispatched set.
+message UtilityDesired {
+  string utility_id = 1;  // catalog id ("docker"); agent refuses unknown ids
+  // config_hash is the platform-computed hash of this utility's resolved
+  // config. The settle records ITS OWN copy from the dispatch payload; the
+  // agent's echo is never trusted as the value (the access-generation rule).
+  string config_hash = 2;
+  // params_json carries the resolved, registry-bounded params as a JSON
+  // object. The agent re-validates what it consumes and ignores unknown keys.
+  string params_json = 3;
+}
+
+// AccessUser is one managed OS user in the desired access config. An empty
+// authorized_keys set means the user must be LOCKED (account expired, not
+// deleted); a non-empty set means active.
+message AccessUser {
+  string username = 1;
+  repeated string authorized_keys = 2; // full resolved public-key lines
+  bool sudo = 3;
+  PasswordAction password_action = 4;
+  // RETIRED: the cleartext password. Never populated since the platform started
+  // sending password_hash (agent floor 0.5.0) — an unprivileged shell on ONE
+  // node could read its adoption token, open a stream as that node, and receive
+  // the account's cleartext passwords for EVERY node in it. The field number
+  // stays reserved-in-place rather than removed: an agent older than the floor
+  // still decodes it, and reusing 5 for anything else would hand such an agent
+  // a garbage password.
+  string password = 5;
+  bool adopt_unmanaged = 6;             // opt in to taking over a pre-existing user of this name
+  // sudo_nopasswd is resolved server-side rather than inferred by the agent:
+  // with password_action == UNCHANGED the agent cannot tell whether the user has
+  // a password, and guessing wrong either breaks sudo for a key-only user or
+  // grants passwordless root to one who should be prompted.
+  bool sudo_nopasswd = 7;
+  // Certificate principals accepted to log in AS this user (written to the
+  // user's AuthorizedPrincipalsFile). Only effective when a CA is trusted on
+  // the node. Principals live on the USER, matching the OpenSSH model — a CA
+  // is a pure trust anchor.
+  repeated string principals = 8;
+  // password_hash is a crypt(3) SHA-512 (`$6$`) hash, populated instead of
+  // `password` when password_action == SET. The agent feeds it to
+  // `chpasswd -e`, which writes it into /etc/shadow verbatim.
+  //
+  // What crosses the wire is then exactly what root on that node could already
+  // read, rather than a credential that also opens every other node in the
+  // account. `$6$` and not bcrypt/yescrypt because glibc and libxcrypt both
+  // verify it everywhere; a hash the target's PAM cannot verify fails silently
+  // at the next login, not at write time.
+  //
+  // The salt is fresh per build, which is safe because the access config's own
+  // hash mixes in only whether a user HAS a password, never its value — so a
+  // differing hash does not make the desired state look changed.
+  string password_hash = 9;
+}
+
+// AccessCA is a trusted external certificate authority: its public CA key.
+// The platform issues nothing.
+message AccessCA {
+  string ca_public_key = 1;    // trusted CA public key line
+  // LEGACY: principals used to live on the trust; they now live on AccessUser.
+  // Still honored by the agent (unioned into same-named users) for old
+  // payloads, but the platform no longer populates it.
+  repeated string principals = 2;
+}
+
+// ReadFileCommand reads a text file and returns it to the platform in the
+// command status result (keys: "content", and "match" = the first capture of
+// the optional regex). For workflow blocks feeding later steps.
+message ReadFileCommand {
+  string path = 1;    // File to read
+  string pattern = 2; // Optional regex; its first capture group is returned as "match"
+  // Refuse to return more than this many bytes (0 = agent default). An
+  // unbounded read is not a size problem, it is a liveness problem: the result
+  // travels in a proto string inside the node's single command stream, so an
+  // oversized or non-UTF-8 file fails the marshal and tears the stream down.
+  uint32 max_bytes = 3;
+}
+
+// ApplyWatchdogConfigCommand declaratively converges the node's watchdog
+// supervision: installs the `watchdog` package if needed, renders
+// /etc/watchdog.conf and enables or disables watchdog.service.
+//
+// The agent validates the proposed config against LIVE device state first and
+// refuses to arm one that would immediately reboot-loop — an unreachable ping
+// target or a threshold the node already exceeds. A refusal changes nothing on
+// the device and comes back in the result key "refusal". Idempotent through
+// config_hash.
+message ApplyWatchdogConfigCommand {
+  string config_hash = 1;
+  bool enabled = 2;               // master switch; false disarms everything
+
+  bool os_hang = 3;               // daemon pets the hardware watchdog
+  int32 watchdog_timeout_sec = 4; // 5..15 — the bcm2835 hardware cap
+
+  bool network = 5;
+  repeated string ping_targets = 6;
+  int32 ping_count = 7;
+  string interface = 8;
+
+  bool agent_health = 9;          // reboot if the agent stops touching its heartbeat file
+  int32 agent_change_sec = 10;
+
+  int32 max_load_1 = 11;
+  int32 max_load_5 = 12;
+  int32 max_load_15 = 13;
+  int32 min_memory_pages = 14;
+  int32 max_temperature_c = 15;
+
+  int32 interval_sec = 16;
+  int32 retry_timeout_sec = 17;
+
+  bool verify_before_arm = 18;
+}
+
+// DeleteFileCommand removes one regular file. Idempotent: deleting a file that
+// is already gone is a success, so a retry after a lost reply is harmless.
+// The agent refuses protected paths, non-regular files and anything whose
+// parent resolves outside what was named — the backend checks the same list,
+// but the agent's copy is the one that survives a bug in a backend path.
+message DeleteFileCommand {
+  string path = 1;
+  // Rename to "<path>.orchestrator.deleted" instead of unlinking. Refuses to
+  // clobber an existing backup rather than silently replacing it.
+  bool backup = 2;
+}
+
+// WaitForFileCommand polls a file until its content matches a regex or a
+// timeout elapses. Returns the first capture group as result key "match".
+// Blocking waits live inside the agent so the workflow graph stays acyclic.
+message WaitForFileCommand {
+  string path = 1;             // File to poll
+  string pattern = 2;          // Regex to match; first capture returned as "match"
+  int32 interval_seconds = 3;  // Poll interval (default 10)
+  int32 timeout_seconds = 4;   // Give up after this long (default 600)
+}
+
+// RunScriptCommand runs a shell script and returns exit_code/stdout/stderr in
+// the command status result. A non-zero exit fails the command.
+message RunScriptCommand {
+  string script = 1;          // Script body (run via /bin/sh)
+  int32 timeout_seconds = 2;  // Kill after this long (default 300)
+}
+
+// PatchFileCommand idempotently inserts or replaces a marker-delimited block
+// in a text file, leaving every other line untouched. Designed for
+// /boot/firmware/config.txt (overclocking, PCIe generation, ...): the block is
+// appended at the end where config.txt's last-value-wins semantics apply, and
+// the original file is backed up once as <path>.orchestrator.bak before the
+// first modification. Distinct markers maintain independent blocks.
+message PatchFileCommand {
+  string path = 1;    // Target file (e.g. "/boot/firmware/config.txt")
+  string content = 2; // Lines to enforce inside the managed block
+  string marker = 3;  // Block identifier (default "orchestrator")
+}
+
+// ReleaseIdentityCommand tells a node to forget that it is adopted: delete its
+// adoption file (and the redacted backup beside it) so the device returns to a
+// clean, unadopted state instead of retrying forever against a platform that no
+// longer has a row for it.
+//
+// It exists because deleting a node is a one-click action whose consequence
+// reaches past the platform. The row goes and the device is told nothing: its
+// adoption file still names a node_id that no longer exists, so ConnectionInit is
+// refused, and a network-first device cannot even reach recovery because
+// HTTP-boot withholds an unknown serial. One was found powered and on the network
+// three days after its node was deleted, invisible to the platform.
+//
+// The agent reports success and then keeps running on its existing stream — it
+// does NOT tear the connection down, because the platform is about to delete the
+// node anyway and a self-inflicted disconnect would race the command report it is
+// trying to send. The identity is gone from disk, so the NEXT start finds no
+// adoption file and the device waits to be adopted again.
+message ReleaseIdentityCommand {
+  // Reason is recorded in the agent log so someone reading the device later can
+  // tell a deliberate release from a corrupted file.
+  string reason = 1;
+}
+
+// SetHostnameCommand changes the hostname of a managed (disk-booted) node.
+// Not meant for the ephemeral netboot bootstrap.
+message SetHostnameCommand {
+  string hostname = 1; // New hostname (RFC 1123 label: [a-z0-9-], <=63 chars)
+}
+
+// UpdateAgentCommand tells a running managed node to self-update: download the
+// given agent version from the platform CDN, install it over the running OS,
+// and restart the agent service. Unlike InstallAgentOnVolumeCommand it operates
+// on the live root filesystem (no mount/chroot).
+message UpdateAgentCommand {
+  string agent_version = 1; // "latest" or a semver like "0.2.0"
+  // Anti-rollback override: the agent refuses to install a package whose
+  // declared version is older than the running one unless this is set
+  // (deliberate, operator-initiated downgrades only).
+  bool allow_downgrade = 2;
+}
+
+message ShutdownCommand {
+  uint32 delay_seconds = 1;
+}
+
+message RestartCommand {
+  uint32 delay_seconds = 1;
+}
+
+message StatusCheckCommand {}
+
+message InstallOSCommand {
+  string image_id = 1;        // UUID of the image
+  string image_url = 2;       // Signed URL from storage
+  string checksum = 3;        // SHA256 checksum
+  string target_device = 4;   // Device path (e.g., "/dev/sda")
+  bool reboot = 5;            // Whether to reboot after installation
+  // RETIRED, all three: the agent ignores them — nothing in handleInstallOS
+  // reads them — and the platform no longer populates them. They were pure leak: an impostor holding one node's adoption
+  // token received the account's provisioning credentials for no functional
+  // reason at all. Reserved in place, never to be reused.
+  string username = 6;
+  string password = 7;
+  string ssh_key = 8;
+  // RETIRED for the same reason and in the same way as 6/7/8: handleInstallOS
+  // reads image id, url, checksum, target device, reboot, wipe and
+  // strip_identity, and nothing else — so this carried every env secret's
+  // plaintext to the device for no functional reason. The platform no longer
+  // populates it. Declared in place, never to be reused: an older agent still
+  // decodes field 9.
+  //
+  // Env secrets reach the installed OS through provision_connection, which does
+  // read them.
+  map<string, string> env = 9;
+  bool wipe = 10;             // Overwrite a disk that already has partitions (restore/re-image); the device must be unmounted. Signatures are wiped before writing.
+  bool strip_identity = 11;   // Strip machine identity (machine-id, SSH host keys, adoption file) from the installed OS: set by the platform when a backup image is deployed onto a node other than its source, so the restored system adopts as the target node instead of cloning the source's identity.
+}
+
+// InstallAgentOnVolumeCommand installs the orchestrator agent onto a newly installed OS volume.
+//
+// **The CALLER owns this sequence.** This comment claimed the backend triggers it
+// automatically after a successful InstallOSCommand; it does not, and nothing in
+// the services ever has: a harness that dispatched only install_os produced a
+// node whose freshly installed disk contained no agent unit and no agent binary,
+// and therefore could never call home. The UI does
+// install_os → install_agent → reboot, and anything else driving an install must
+// do the same. Note install_os's own `reboot` flag must be FALSE for that, or the
+// device restarts into an OS with no agent in it.
+message InstallAgentOnVolumeCommand {
+  string target_device = 1;   // Device path where OS was installed (e.g., "/dev/nvme0n1")
+  uint32 root_partition = 2;  // Root partition number (0 = auto-detect largest ext4 partition, otherwise use specified partition)
+  string agent_version = 3;   // Agent version to install (e.g., "latest" or "1.2.3")
+  // variant selects WHICH agent is installed: ""/"full" = the managing agent,
+  // "watcher" = the telemetry-only Watcher (wire value renamed
+  // from "observer" in 0.7.0). The platform refuses to dispatch "watcher" to
+  // a recovery agent below the 0.7.0 floor — an
+  // older agent would silently install the FULL agent instead, which is the
+  // opposite of what an operator choosing Watcher asked for.
+  string variant = 4;
+}
+
+message FileChangedEvent {
+  string path = 1;              // File path (e.g., "/boot/config.txt")
+  string content = 2;           // File content
+  string hash = 3;              // SHA256 hash of content
+  int32 version = 4;            // Version number (0 if unknown/initial report)
+  string status = 5;           // "applying", "applied", "failed"
+  int64 timestamp = 6;          // Timestamp of the event
+  string error_message = 7;    // Optional error message if status is "failed"
+}
+
+message UpdateFileCommand {
+  string path = 1;              // File path (e.g., "/boot/config.txt")
+  string content = 2;           // File content to write
+  string hash = 3;              // SHA256 hash of new content
+  int32 version = 4;            // Version number being deployed
+}
+
+message UpdateBootOrderCommand {
+  repeated string boot_order = 1;  // New boot order as array: ["nvme", "sd", "usb", "restart"]
+  // Short-lived HMAC capability the agent must present to download the
+  // per-device (adoption-token-bearing) EEPROM package. Empty on installs
+  // without the signed-download requirement.
+  string pkg_exp = 2;  // capability expiry (unix seconds, as string)
+  string pkg_sig = 3;  // capability signature (hex)
+}
+
+// ProvisionConnectionCommand provisions user credentials and SSH key on a volume.
+// It renames the default user, sets password, and configures SSH access.
+// For manual provisioning: target_device and root_partition are provided.
+// For automatic provisioning: target_device is the same as OS installation device.
+message ProvisionConnectionCommand {
+  string username = 1;        // Username to set (will rename default user to this)
+  // RETIRED: the cleartext password, replaced by password_hash (agent floor
+  // 0.5.0). Kept reserved in place, never populated, and never to be reused:
+  // an agent below the floor still decodes field 2.
+  string password = 2;
+  string ssh_key = 3;         // SSH public key content to place into authorized_keys or CA key
+  string target_device = 4;   // Target device path (e.g., "/dev/sda"). Empty means current root.
+  uint32 root_partition = 5;  // Root partition number (0 means auto-detect)
+  string ssh_key_type = 6;    // Key type: "ssh" (authorized_keys) or "ca" (certificate authority)
+  map<string, string> env = 7; // Environment secrets (name -> value) to write into the target OS (optional)
+  // crypt(3) SHA-512 (`$6$`) hash of the password, applied with `chpasswd -e`.
+  // The second of the two cleartext-password senders the access-config fix
+  // closed: the provisioning password is usually an OU or account DEFAULT, so
+  // it is shared across the fleet and leaking it from one device leaks it for
+  // all of them.
+  string password_hash = 8;
+}
+
+// EnableEEPROMCommand enables EEPROM updates on Raspberry Pi systems
+// Updates configuration files and reboots the system
+message EnableEEPROMCommand {
+  // Empty - no parameters needed
+}
+
+// EraseDriveCommand erases all filesystem signatures from a drive using wipefs
+message EraseDriveCommand {
+  string target_device = 1;   // Device path to erase (e.g., "/dev/sda")
+}
+
+// Service definition
+service NodeCommunication {
+  rpc EstablishStream(stream NodeToPlatform) returns (stream PlatformToNode);
+}

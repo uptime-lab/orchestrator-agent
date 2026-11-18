@@ -1,0 +1,37 @@
+[Unit]
+Description=Orchestrator Watcher - telemetry-only agent (no management)
+After=network-online.target
+Wants=network-online.target
+# The two agents are mutually exclusive on a node: both would authenticate the
+# same identity and the fleet would flap between full and watcher.
+Conflicts=orchestrator-agent.service
+
+[Service]
+Type=simple
+# Unprivileged on purpose — "cannot break the node" is the product promise.
+# The user is created by the package postinstall; it owns only its adoption
+# directory.
+User=orchestrator-watcher
+Group=orchestrator-watcher
+ExecStart=/usr/bin/orchestrator-watcher --adoption-file=/etc/orchestrator-watcher/node-adoption.txt
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orchestrator-watcher
+
+# Hardening: this process needs the network, read access to /proc//sys for
+# telemetry, and write access to nothing but its own config directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/orchestrator-watcher
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

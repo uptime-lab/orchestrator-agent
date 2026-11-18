@@ -1,0 +1,16 @@
+# REUSE.toml of the agent source mirror (https://reuse.software/spec-3.3/).
+# The mirror carries only the Apache-2.0 directories of the main repository
+# (agent/, proto/, tools/agent-signer/), so the whole tree is Apache-2.0.
+# The main repository's tools/publication-guard/check_licence_boundary.py runs
+# against an export of this tree before a mirror commit is made.
+
+version = 1
+SPDX-PackageName = "Uptime Orchestrator agent"
+SPDX-PackageSupplier = "Uptime Lab Inc."
+SPDX-PackageDownloadLocation = "https://github.com/uptime-lab/orchestrator-agent"
+
+[[annotations]]
+path = "**"
+precedence = "override"
+SPDX-FileCopyrightText = "2025-2026 Uptime Lab Inc. and the Uptime Orchestrator authors"
+SPDX-License-Identifier = "Apache-2.0"

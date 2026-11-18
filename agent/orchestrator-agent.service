@@ -1,0 +1,23 @@
+[Unit]
+Description=Orchestrator Agent - Node management agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/orchestrator-agent --adoption-file=/etc/orchestrator/node-adoption.txt
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orchestrator-agent
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
+
