@@ -11,16 +11,16 @@ licensed under the Apache License 2.0 (`LICENSE`); see `NOTICE`.
 
 | Component | Version | Licence | Texts |
 |---|---|---|---|
-| `Go standard library and runtime` | go1.26.6 | BSD-3-Clause | [T1](#t1) |
+| `Go standard library and runtime` | go1.26.11 | BSD-3-Clause | [T1](#t1) |
 | `github.com/creack/pty` | v1.1.24 | MIT | [T2](#t2) |
 | `github.com/fsnotify/fsnotify` | v1.10.1 | BSD-3-Clause | [T3](#t3) |
 | `github.com/google/uuid` | v1.6.0 | BSD-3-Clause | [T4](#t4) |
-| `github.com/klauspost/compress` | v1.19.2 | Apache-2.0 | [T5](#t5) |
-| `github.com/ulikunitz/xz` | v0.5.16 | BSD-3-Clause | [T6](#t6) |
+| `github.com/klauspost/compress` | v1.20.4 | Apache-2.0 | [T5](#t5) |
+| `github.com/ulikunitz/xz` | v0.5.17 | BSD-3-Clause | [T6](#t6) |
 | `github.com/warthog618/go-gpiocdev` | v0.9.1 | MIT | [T7](#t7) |
-| `golang.org/x/net` | v0.58.0 | BSD-3-Clause | [T1](#t1) |
-| `golang.org/x/sys` | v0.47.0 | BSD-3-Clause | [T1](#t1) |
-| `golang.org/x/text` | v0.41.0 | BSD-3-Clause | [T1](#t1) |
+| `golang.org/x/net` | v0.63.0 | BSD-3-Clause | [T1](#t1) |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | [T1](#t1) |
+| `golang.org/x/text` | v0.44.0 | BSD-3-Clause | [T1](#t1) |
 | `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260526163538-3dc84a4a5aaa | Apache-2.0 | [T8](#t8) |
 | `google.golang.org/grpc` | v1.83.2 | Apache-2.0 + NOTICE | [T8](#t8), [T9](#t9) |
 | `google.golang.org/protobuf` | v1.36.12 | BSD-3-Clause | [T10](#t10) |
@@ -31,7 +31,7 @@ Each text is reproduced once, exactly as the component ships it (trailing whites
 
 ### T1
 
-Carried by: `Go standard library and runtime@go1.26.6`, `golang.org/x/net@v0.58.0`, `golang.org/x/sys@v0.47.0`, `golang.org/x/text@v0.41.0`.
+Carried by: `Go standard library and runtime@go1.26.11`, `golang.org/x/net@v0.63.0`, `golang.org/x/sys@v0.50.0`, `golang.org/x/text@v0.44.0`.
 
 ~~~~text
 Copyright 2009 The Go Authors.
@@ -161,7 +161,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### T5
 
-Carried by: `github.com/klauspost/compress@v1.19.2`.
+Carried by: `github.com/klauspost/compress@v1.20.4`.
 
 ~~~~text
 Copyright (c) 2012 The Go Authors. All rights reserved.
@@ -472,7 +472,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### T6
 
-Carried by: `github.com/ulikunitz/xz@v0.5.16`.
+Carried by: `github.com/ulikunitz/xz@v0.5.17`.
 
 ~~~~text
 Copyright (c) 2014-2022  Ulrich Kunitz

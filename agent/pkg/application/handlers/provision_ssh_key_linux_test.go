@@ -25,6 +25,15 @@ func TestSSHKeyLandsInThePasswdHome(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// provisionSSHKeyOnRoot creates the home only as root: on a device the
+	// parent of a home is root-owned and nothing else may create it. An
+	// unprivileged test run stands in for an image whose home already exists.
+	if os.Geteuid() != 0 {
+		if err := os.MkdirAll(filepath.Join(root, "srv", "relocated"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	h := &CommandHandler{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexamplekeymaterialexamplekeymaterial operator"
 	if err := h.provisionSSHKeyOnRoot(root, "relocated", key); err != nil {
