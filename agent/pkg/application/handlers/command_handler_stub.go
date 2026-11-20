@@ -88,6 +88,10 @@ func (h *CommandHandler) handleApplyDeviceProfile(commandID string, cmd *proto.A
 // through the Linux RTC ioctls.
 func (h *CommandHandler) StartRTCKeeper() {}
 
+// MigrateLegacyEnvironmentSecrets is a no-op off Linux: older agents wrote env
+// secrets into /etc/environment on Linux only.
+func (h *CommandHandler) MigrateLegacyEnvironmentSecrets() {}
+
 // handleIdentify blinks the locate LED (stub for non-Linux)
 func (h *CommandHandler) handleIdentify(commandID string, cmd *proto.IdentifyCommand) error {
 	h.reportCommandStatus(commandID, "failed", 0, "identify is only supported on Linux nodes")

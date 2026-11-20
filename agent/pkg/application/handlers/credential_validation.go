@@ -74,7 +74,7 @@ var envNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // validateEnvName rejects environment variable names that are not valid shell
 // identifiers, which also prevents injecting extra lines or an "=" separator
-// into /etc/environment.
+// into the env-secrets file.
 func validateEnvName(name string) error {
 	if !envNameRegex.MatchString(name) {
 		return fmt.Errorf("invalid environment variable name %q", name)

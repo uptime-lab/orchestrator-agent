@@ -3085,10 +3085,10 @@ func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordH
 		return fmt.Errorf("failed to configure SSH service: %w", err)
 	}
 
-	// 5. Reconcile environment secrets into the target OS (/etc/environment).
-	// Called unconditionally: an EMPTY set must still run so that detaching the
-	// last env secret removes the managed block — gating on len(env) > 0 is
-	// exactly the bug that made detached secrets immortal on the device.
+	// 5. Reconcile environment secrets into the target OS (/etc/orchestrator/env,
+	// root only). Called unconditionally: an EMPTY set must still run so that
+	// detaching the last env secret removes it from the device — gating on
+	// len(env) > 0 would make a detached secret immortal there.
 	if err := h.writeEnvironmentOnRoot(rootPath, env); err != nil {
 		return fmt.Errorf("failed to write environment secrets: %w", err)
 	}
@@ -3208,57 +3208,34 @@ func (h *CommandHandler) enableEEPROMUpdatesOnRoot(rootPath string) error {
 	return nil
 }
 
-// writeEnvironmentOnRoot reconciles the platform-managed marker block in the
-// target filesystem's /etc/environment against the given effective env-secret
-// set (see reconcileEnvironmentContent). Keys and values are validated to
-// prevent injecting extra lines into the file. An empty set is a real input:
-// it removes the managed block, which is how the last detached secret leaves
-// the device.
+// writeEnvironmentOnRoot delivers the effective env-secret set to the target
+// filesystem as the root-only /etc/orchestrator/env and removes the copies older
+// agents left in /etc/environment (see reconcileEnvSecretsOnRoot). An empty set
+// is a real input: it removes the file, which is how the last detached secret
+// leaves the device.
 func (h *CommandHandler) writeEnvironmentOnRoot(rootPath string, env map[string]string) error {
-	for name, value := range env {
-		if err := validateEnvName(name); err != nil {
-			return err
-		}
-		if strings.ContainsAny(value, "\n\r") {
-			return fmt.Errorf("invalid value for env %q: must not contain newline characters", name)
-		}
-	}
-
-	envPath := filepath.Join(rootPath, "etc", "environment")
-
-	original, err := os.ReadFile(envPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("failed to read %s: %w", envPath, err)
-		}
-		if len(env) == 0 {
-			return nil
-		}
-	}
-
-	content, err := reconcileEnvironmentContent(original, env)
-	if err != nil {
-		return fmt.Errorf("failed to reconcile %s: %w", envPath, err)
-	}
-	if len(env) == 0 && bytes.Equal(content, original) {
-		// Nothing of ours in the file and nothing to add — leave a stock
-		// /etc/environment (content AND mode) untouched.
-		return nil
-	}
-
-	// 0600 root:root keeps the values from processes that never open a PAM
-	// session (service accounts, daemons, a tool that parses this file). It
-	// does NOT keep them from local users: pam_env reads the file as root
-	// during session setup and exports every line into each session it opens
-	// — ssh, login, su and cron alike — so every account that can log in on
-	// this host, an unprivileged access entry included, sees every value in
-	// its environment. That is the delivery mechanism, not a leak in it; a
-	// value no logged-in user may read does not belong in an env secret.
-	if err := writeFileAtomic(envPath, content, 0o600); err != nil {
+	if err := reconcileEnvSecretsOnRoot(rootPath, env); err != nil {
 		return err
 	}
-	h.logger.Info("reconciled environment secrets on target OS", "count", len(env), "path", envPath)
+	h.logger.Info("reconciled environment secrets on target OS", "count", len(env),
+		"path", filepath.Join(rootPath, envSecretsRelPath))
 	return nil
+}
+
+// MigrateLegacyEnvironmentSecrets runs once at agent start on the running
+// system: a set an older agent wrote into /etc/environment, where pam_env hands
+// it to every login session, moves into the root-only file. Best-effort — a
+// failure is logged and the next provision retries the removal.
+func (h *CommandHandler) MigrateLegacyEnvironmentSecrets() {
+	migrated, err := migrateLegacyEnvironmentOnRoot("/")
+	if err != nil {
+		h.logger.Warn("failed to move environment secrets out of /etc/environment", "error", err)
+		return
+	}
+	if migrated {
+		h.logger.Info("moved environment secrets from /etc/environment to the root-only file",
+			"path", "/"+envSecretsRelPath)
+	}
 }
 
 // userExists checks if a user exists in the passwd file.

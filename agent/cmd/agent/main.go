@@ -228,6 +228,10 @@ To adopt a new node, use the install command from the platform UI
 	// TLS dial therefore fails, so the keeper must not be downstream of a
 	// connection that cannot succeed until the clock is fixed.
 	commandHandler.StartRTCKeeper()
+	// Env secrets an older agent left in /etc/environment reach every login
+	// session through pam_env; move them into the root-only file now rather
+	// than at the next provision, which on an installed node may never come.
+	commandHandler.MigrateLegacyEnvironmentSecrets()
 	// Without this every "is this the adoption file?" guard in the file handlers
 	// is skipped: they are all written as `if adoptionFile != ""`, and the
 	// setter had no callers at all, so the inode check that catches a symlinked

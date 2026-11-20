@@ -1,62 +1,44 @@
 package handlers
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// environmentMarker names the managed block in /etc/environment. The markers
-// are the patch_file idiom (`# >>> orchestrator:environment >>>`), so the same
-// parser rules apply: everything outside the block is operator-owned and
-// preserved byte-for-byte, everything inside is platform-owned and replaced
-// wholesale on every apply.
+// envSecretsRelPath is where env secrets land, relative to a root filesystem:
+// /etc/orchestrator/env, 0600 root:root. Readable by root only, and loaded by
+// nothing automatically — a service opts in with
+// `EnvironmentFile=/etc/orchestrator/env`, a root shell with
+// `set -a; . /etc/orchestrator/env; set +a`. /etc/orchestrator is the agent's own
+// directory: image capture strips it and the uninstall script removes it, so the
+// values leave with the node's identity.
+//
+// It is NOT /etc/environment. pam_env reads that file as root and exports every
+// line into every session it opens (ssh, login, su, cron), so every account that
+// can log in on the device saw every value whatever the file's mode was.
+var envSecretsRelPath = filepath.Join("etc", "orchestrator", "env")
+
+// legacyEnvironmentRelPath is the file older agents wrote env secrets into.
+var legacyEnvironmentRelPath = filepath.Join("etc", "environment")
+
+// environmentMarker names the block older agents managed in /etc/environment
+// (`# >>> orchestrator:environment >>>`, the patch_file idiom). Its content is
+// the last set those agents applied; everything outside it is operator-owned.
 const environmentMarker = "environment"
 
-// reconcileEnvironmentContent computes the new /etc/environment content for
-// the given desired env-secret set. The incoming map is the RESOLVED effective
-// set (node → OU → root union, built platform-side), so it is authoritative:
-// the managed block is replaced with exactly this set, which is what makes a
-// DETACHED secret disappear from the device — the old merge only overwrote
-// incoming keys and could never remove one.
-//
-// An incoming key found OUTSIDE the block is dropped from there and written
-// inside it: that is the one-time migration for files written by agents that
-// predate the marker (they merged keys directly into the file body). Keys
-// detached BEFORE the first marker-aware apply are indistinguishable from
-// operator-owned lines and are deliberately left alone — guessing would risk
-// deleting an operator's own variable.
-//
-// An empty incoming set removes the managed block entirely and keeps the rest
-// of the file.
-func reconcileEnvironmentContent(original []byte, env map[string]string) ([]byte, error) {
-	begin, end := patchMarkerLines(environmentMarker)
-
-	// Drop every line whose key is in the incoming set, wherever it sits:
-	// outside the block it is a pre-marker copy (migration), inside it is
-	// replaced wholesale below anyway. Marker and comment lines are kept.
-	lines := strings.Split(string(original), "\n")
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == begin || trimmed == end {
-			kept = append(kept, line)
-			continue
-		}
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			key := strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0])
-			if _, managed := env[key]; managed {
-				continue
-			}
-		}
-		kept = append(kept, line)
-	}
-	cleaned := []byte(strings.Join(kept, "\n"))
-
-	if len(env) == 0 {
-		return removeManagedBlock(cleaned, environmentMarker)
-	}
-
+// renderEnvSecretsFile renders the effective env-secret set in a syntax that
+// systemd's EnvironmentFile= and a POSIX shell's `.` read to the same values:
+// every value is double-quoted with backslash, double quote, dollar and
+// backtick escaped (see quoteEnvValue). The single-quote idiom a shell reads
+// (close, escaped quote, reopen) is NOT what systemd reads: it hands a unit a
+// different value. Keys are
+// sorted so an unchanged set renders byte-identically. Callers validate keys and
+// reject newlines in values before rendering.
+func renderEnvSecretsFile(env map[string]string) []byte {
 	names := make([]string, 0, len(env))
 	for name := range env {
 		names = append(names, name)
@@ -64,49 +46,225 @@ func reconcileEnvironmentContent(original []byte, env map[string]string) ([]byte
 	sort.Strings(names)
 
 	var b strings.Builder
+	b.WriteString("# Environment secrets delivered by the orchestrator agent. Root only.\n")
+	b.WriteString("# Rewritten on every provision; edits here are lost.\n")
+	b.WriteString("# A systemd unit: EnvironmentFile=/etc/orchestrator/env\n")
+	b.WriteString("# A root shell:   set -a; . /etc/orchestrator/env; set +a\n")
 	for _, name := range names {
-		fmt.Fprintf(&b, "%s=%s\n", name, env[name])
+		fmt.Fprintf(&b, "%s=%s\n", name, quoteEnvValue(env[name]))
 	}
-	return patchManagedBlock(cleaned, b.String(), environmentMarker)
+	return []byte(b.String())
 }
 
-// removeManagedBlock strips the marker-delimited block (markers included) from
-// the content, preserving every other line. A file with no markers is returned
-// unchanged; broken or duplicated markers are refused with the same rules as
-// patchManagedBlock, for the same reason — do not modify a file whose managed
-// region cannot be identified unambiguously.
-func removeManagedBlock(original []byte, marker string) ([]byte, error) {
-	begin, end := patchMarkerLines(marker)
+// quoteEnvValue double-quotes a value. Inside double quotes both systemd and
+// a POSIX shell unescape exactly \\, \", \$ and \`, and neither expands
+// anything once those are escaped, so the two read the same bytes back.
+func quoteEnvValue(v string) string {
+	return `"` + envValueEscaper.Replace(v) + `"`
+}
+
+var envValueEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+
+// scrubLegacyEnvironment removes every env secret an older agent wrote into
+// /etc/environment and returns the cleaned content plus the set it found in the
+// managed block (the last set that agent applied).
+//
+// What is removed: the managed block, markers included; and, outside it, every
+// line whose key is in that last-applied set or in `incoming` — those are copies
+// merged into the file body by agents that predate the marker. Nothing else is
+// touched: comments, blank lines and an operator's own variables survive
+// byte-for-byte. A pre-marker key that is in neither set cannot be told apart
+// from an operator's line and is left alone.
+//
+// Broken or duplicated markers are refused, as patchManagedBlock refuses them:
+// the managed region cannot be identified, so the file is not modified.
+func scrubLegacyEnvironment(original []byte, incoming map[string]string) ([]byte, map[string]string, error) {
+	begin, end := patchMarkerLines(environmentMarker)
 	lines := strings.Split(string(original), "\n")
+
 	beginIdx, endIdx := -1, -1
 	beginCount, endCount := 0, 0
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == begin {
+		switch strings.TrimSpace(line) {
+		case begin:
 			beginCount++
 			if beginIdx == -1 {
 				beginIdx = i
 			}
-		}
-		if trimmed == end {
+		case end:
 			endCount++
 			if endIdx == -1 {
 				endIdx = i
 			}
 		}
 	}
-	if beginCount == 0 && endCount == 0 {
-		return original, nil
-	}
 	if beginCount > 1 || endCount > 1 {
-		return nil, fmt.Errorf("managed block markers for '%s' appear more than once (%d begin, %d end); refusing to modify the file", marker, beginCount, endCount)
+		return nil, nil, fmt.Errorf("managed block markers for '%s' appear more than once (%d begin, %d end); refusing to modify the file", environmentMarker, beginCount, endCount)
 	}
-	if beginIdx == -1 || endIdx <= beginIdx {
-		return nil, fmt.Errorf("managed block markers for '%s' are malformed (begin at line %d, end at line %d); refusing to modify the file", marker, beginIdx+1, endIdx+1)
+	if (beginCount != 0 || endCount != 0) && (beginIdx == -1 || endIdx <= beginIdx) {
+		return nil, nil, fmt.Errorf("managed block markers for '%s' are malformed (begin at line %d, end at line %d); refusing to modify the file", environmentMarker, beginIdx+1, endIdx+1)
 	}
 
-	out := make([]string, 0, len(lines))
-	out = append(out, lines[:beginIdx]...)
-	out = append(out, lines[endIdx+1:]...)
-	return []byte(strings.Join(out, "\n")), nil
+	applied := map[string]string{}
+	if beginIdx != -1 {
+		for _, line := range lines[beginIdx+1 : endIdx] {
+			if key, value, ok := envAssignment(line); ok {
+				applied[key] = value
+			}
+		}
+	}
+
+	kept := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if beginIdx != -1 && i >= beginIdx && i <= endIdx {
+			continue
+		}
+		if key, _, ok := envAssignment(line); ok {
+			_, wasApplied := applied[key]
+			_, isIncoming := incoming[key]
+			if wasApplied || isIncoming {
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	return []byte(strings.Join(kept, "\n")), applied, nil
+}
+
+// envAssignment parses a KEY=value line as older agents wrote them. Blank and
+// comment lines are not assignments.
+func envAssignment(line string) (key, value string, ok bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", "", false
+	}
+	parts := strings.SplitN(trimmed, "=", 2)
+	key = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		value = parts[1]
+	}
+	return key, value, key != ""
+}
+
+// validateEnvSecrets rejects a set that could not be written one assignment per
+// line: a key that is not a shell identifier, or a value carrying a line break.
+func validateEnvSecrets(env map[string]string) error {
+	for name, value := range env {
+		if err := validateEnvName(name); err != nil {
+			return err
+		}
+		if strings.ContainsAny(value, "\n\r") {
+			return fmt.Errorf("invalid value for env %q: must not contain newline characters", name)
+		}
+	}
+	return nil
+}
+
+// writeEnvSecretsOnRoot makes the root-only env file under rootPath hold exactly
+// the given effective set (node → OU → root, resolved platform-side, so it is
+// authoritative: a detached secret disappears). An empty set removes the file.
+// rootPath is "/" on the running system or the mount point of an installed
+// rootfs written from recovery.
+func writeEnvSecretsOnRoot(rootPath string, env map[string]string) error {
+	if err := validateEnvSecrets(env); err != nil {
+		return err
+	}
+	path := filepath.Join(rootPath, envSecretsRelPath)
+	if len(env) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		}
+		return nil
+	}
+	// writeFileAtomic stages in a 0600 temp file beside the target and renames
+	// it into place, so no reader ever sees a partial file and no copy of a
+	// value is left behind on either outcome.
+	return writeFileAtomic(path, renderEnvSecretsFile(env), 0o600)
+}
+
+// scrubLegacyEnvironmentOnRoot removes the env secrets older agents wrote into
+// rootPath's /etc/environment (see scrubLegacyEnvironment) and returns the set
+// found in their managed block. A file with nothing of ours in it is not
+// rewritten, so a stock /etc/environment keeps its content and its mode; a
+// rewritten one keeps its current mode. No backup copy is made — it would carry
+// the values this exists to remove.
+func scrubLegacyEnvironmentOnRoot(rootPath string, incoming map[string]string) (map[string]string, error) {
+	path := filepath.Join(rootPath, legacyEnvironmentRelPath)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	cleaned, applied, err := scrubLegacyEnvironment(original, incoming)
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove env secrets from %s: %w", path, err)
+	}
+	if bytes.Equal(cleaned, original) {
+		return applied, nil
+	}
+	mode := os.FileMode(0o600)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := writeFileAtomic(path, cleaned, mode); err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
+// reconcileEnvSecretsOnRoot is what every apply runs: the root-only file is
+// written first, so a failure there leaves the device as it was; only then are
+// the legacy copies in /etc/environment removed.
+func reconcileEnvSecretsOnRoot(rootPath string, env map[string]string) error {
+	if err := writeEnvSecretsOnRoot(rootPath, env); err != nil {
+		return err
+	}
+	_, err := scrubLegacyEnvironmentOnRoot(rootPath, env)
+	return err
+}
+
+// migrateLegacyEnvironmentOnRoot moves a set an older agent left in
+// /etc/environment into the root-only file without waiting for the next apply,
+// so taking the new agent is enough to take the values out of login sessions.
+// The root-only file, when it exists, came from a newer apply and wins: the
+// legacy set is then only removed. It reports whether anything was migrated.
+func migrateLegacyEnvironmentOnRoot(rootPath string) (bool, error) {
+	path := filepath.Join(rootPath, legacyEnvironmentRelPath)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	_, applied, err := scrubLegacyEnvironment(original, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect %s: %w", path, err)
+	}
+	if len(applied) == 0 {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(rootPath, envSecretsRelPath)); os.IsNotExist(err) {
+		// Values an older agent accepted but this one would refuse are dropped
+		// rather than carried over: the file must stay one assignment per line.
+		valid := make(map[string]string, len(applied))
+		for k, v := range applied {
+			if validateEnvSecrets(map[string]string{k: v}) == nil {
+				valid[k] = v
+			}
+		}
+		if len(valid) > 0 {
+			if err := writeEnvSecretsOnRoot(rootPath, valid); err != nil {
+				return false, err
+			}
+		}
+	} else if err != nil {
+		return false, fmt.Errorf("failed to stat %s: %w", filepath.Join(rootPath, envSecretsRelPath), err)
+	}
+	if _, err := scrubLegacyEnvironmentOnRoot(rootPath, nil); err != nil {
+		return false, err
+	}
+	return true, nil
 }
