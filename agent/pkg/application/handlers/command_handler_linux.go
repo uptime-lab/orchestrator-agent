@@ -222,7 +222,7 @@ func (h *CommandHandler) validateTargetDevice(devicePath string, allowPartitione
 	}
 	if f, err := os.OpenFile(devicePath, os.O_RDONLY|syscall.O_EXCL, 0); err != nil {
 		if errors.Is(err, syscall.EBUSY) {
-			return fmt.Errorf("device %s is in use (a mounted, device-mapper, md or swap partition holds it) and cannot be used for OS installation", devicePath)
+			return fmt.Errorf("device %s cannot be used for OS installation: %w (a mounted, device-mapper, md or swap partition holds it, or a filesystem detached lazily is still held open)", devicePath, errTargetDeviceBusy)
 		}
 	} else {
 		_ = f.Close()
@@ -2148,7 +2148,8 @@ func (h *CommandHandler) handleInstallOS(commandID string, cmd *proto.InstallOSC
 	// flow for a board with no NVMe, and the bootstrap keeps that card mounted
 	// for its adoption file — which the validation below would then refuse as a
 	// mounted device. No-op on an installed OS.
-	if released, rerr := h.releaseBootMediaMounts(cmd.TargetDevice); rerr != nil {
+	released, lazilyDetached, rerr := h.releaseBootMediaMounts(cmd.TargetDevice)
+	if rerr != nil {
 		h.logger.Warn("could not fully release the target device before install",
 			"command_id", commandID, "target_device", cmd.TargetDevice, "error", rerr)
 	} else if len(released) > 0 {
@@ -2158,6 +2159,7 @@ func (h *CommandHandler) handleInstallOS(commandID string, cmd *proto.InstallOSC
 
 	// Initial validation
 	if err := h.validateTargetDevice(cmd.TargetDevice, cmd.Wipe); err != nil {
+		err = explainBusyAfterLazyUnmount(err, lazilyDetached)
 		errMsg := fmt.Sprintf("device validation failed: %v", err)
 		h.logger.Error("device validation failed", "command_id", commandID, "target_device", cmd.TargetDevice, "error", err)
 		// Report command failure
@@ -4007,7 +4009,7 @@ func (h *CommandHandler) handleEraseDrive(commandID string, cmd *proto.EraseDriv
 	// by the bootstrap itself. Without this the erase fails with "probing
 	// initialization failed: Device or resource busy" and names nothing that
 	// would let an operator work out why. No-op on an installed OS.
-	if released, rerr := h.releaseBootMediaMounts(cmd.TargetDevice); rerr != nil {
+	if released, _, rerr := h.releaseBootMediaMounts(cmd.TargetDevice); rerr != nil {
 		h.logger.Warn("could not fully release the target device before erase",
 			"command_id", commandID, "target_device", cmd.TargetDevice, "error", rerr)
 	} else if len(released) > 0 {

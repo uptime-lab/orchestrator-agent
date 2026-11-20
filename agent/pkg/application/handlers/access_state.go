@@ -53,6 +53,10 @@ type accessUserState struct {
 	// actually had rather than guessing /bin/bash.
 	OriginalShell string `json:"original_shell,omitempty"`
 	Locked        bool   `json:"locked,omitempty"`
+	// SessionsEnded records that the user's running processes were ended after
+	// the lock, so the teardown runs once per lock rather than on every apply.
+	// Absent (a lock that predates it, or a lost state file) means not yet.
+	SessionsEnded bool `json:"sessions_ended,omitempty"`
 	// SudoersFile is the drop-in we own for this user, so revoking sudo removes
 	// exactly our grant and never an operator's.
 	SudoersFile string `json:"sudoers_file,omitempty"`

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,4 +70,20 @@ func targetDeviceHolders(sysClassBlock, procSwaps, devicePath string) []string {
 		}
 	}
 	return held
+}
+
+// errTargetDeviceBusy is the kernel refusing an exclusive open of the target.
+var errTargetDeviceBusy = errors.New("the device is in use (an exclusive open was refused)")
+
+// explainBusyAfterLazyUnmount names the likely cause of a busy refusal when a
+// mount on the target could only be detached lazily: something still holds a
+// file or a working directory on it, and since the mount is gone from
+// /proc/mounts nothing else the operator can read says so. The refusal stands.
+func explainBusyAfterLazyUnmount(err error, lazilyDetached []string) error {
+	if len(lazilyDetached) == 0 || !errors.Is(err, errTargetDeviceBusy) {
+		return err
+	}
+	return fmt.Errorf("%w; the mount at %s could only be detached lazily, so something still holds a file "+
+		"or a working directory on it (a shell whose current directory is under it, for example): "+
+		"close it and retry", err, strings.Join(lazilyDetached, ", "))
 }

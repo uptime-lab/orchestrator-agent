@@ -125,3 +125,61 @@ func TestSameDownloadOriginTreatsDowngradeAsCrossOrigin(t *testing.T) {
 		}
 	}
 }
+
+// No redirect carries the previous URL as Referer, whatever the operator
+// headers: the query of a download URL can hold a resolved secret.
+func TestDownloadFileSendsNoRefererOnRedirect(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		sameOrg bool
+	}{
+		{"cross-origin, no operator headers", nil, false},
+		{"cross-origin, operator headers", map[string]string{"X-Api-Key": "key-value"}, false},
+		{"same origin", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			referer := "unset"
+			final := func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				referer = r.Header.Get("Referer")
+				mu.Unlock()
+				_, _ = w.Write([]byte("payload"))
+			}
+			other := httptest.NewServer(http.HandlerFunc(final))
+			defer other.Close()
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/final" {
+					final(w, r)
+					return
+				}
+				next := other.URL + "/object"
+				if tc.sameOrg {
+					next = "/final"
+				}
+				http.Redirect(w, r, next, http.StatusFound)
+			}))
+			defer origin.Close()
+
+			client, _ := newDownloadFileClient(5*time.Second, tc.headers)
+			req, err := http.NewRequest(http.MethodGet, origin.URL+"/pkg.tar?token=secret-value", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			if referer != "" {
+				t.Errorf("the redirect target received Referer %q", referer)
+			}
+		})
+	}
+}

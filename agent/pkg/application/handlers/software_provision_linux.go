@@ -764,10 +764,12 @@ func extractTarInto(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 // A refused archive leaves nothing behind: when r can be rewound (the
 // download path hands over its staging descriptor) the whole archive is read
 // and judged once WITHOUT writing — every name, link target, hardlink source,
-// protected-name check, entry and byte cap, and the decoder's completion —
-// and only an archive that passes is unpacked. Refusals that depend on the
-// destination's own state (a symlinked or aliased component met during the
-// walk) can still stop the unpack part-way.
+// protected-name check, entry and byte cap, the decoder's completion, and the
+// paths the archive's own members create (archiveLayout: a member reached
+// through a symlink or file an earlier member made) — and only an archive that
+// passes is unpacked. Refusals that depend on the destination's own state (a
+// symlinked or aliased component it already held, met during the walk) can
+// still stop the unpack part-way.
 func extractTarIntoTracked(rootFD int, r io.Reader, sourceURL, dir string, protected func(string) error, governingIDs map[fileIdentity]string) (map[string]struct{}, error) {
 	if rs, ok := r.(io.ReadSeeker); ok {
 		start, err := rs.Seek(0, io.SeekCurrent)
@@ -815,6 +817,7 @@ func extractTarPass(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 	// function so the ownership walk that follows uses the same anchor.
 	var totalBytes int64
 	var entries int
+	layout := archiveLayout{}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -846,6 +849,9 @@ func extractTarPass(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 		mode := os.FileMode(hdr.Mode).Perm() & 0o777
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			if err := layout.place(comps, archiveDir); err != nil {
+				return nil, fmt.Errorf("tar entry %q: %w", hdr.Name, err)
+			}
 			if len(comps) == 0 || !apply {
 				continue // the root itself, or a judging pass
 			}
@@ -862,6 +868,9 @@ func extractTarPass(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 		case tar.TypeReg:
 			if len(comps) == 0 {
 				return nil, fmt.Errorf("tar entry %q is not a file name", hdr.Name)
+			}
+			if err := layout.place(comps, archiveFile); err != nil {
+				return nil, fmt.Errorf("tar entry %q: %w", hdr.Name, err)
 			}
 			if !apply {
 				created[target] = struct{}{}
@@ -919,6 +928,9 @@ func extractTarPass(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 			if resolved != cleanDir && !strings.HasPrefix(resolved, cleanDir+string(os.PathSeparator)) {
 				return nil, fmt.Errorf("tar symlink %q -> %q escapes destination", hdr.Name, linkTarget)
 			}
+			if err := layout.place(comps, archiveSymlink); err != nil {
+				return nil, fmt.Errorf("tar entry %q: %w", hdr.Name, err)
+			}
 			if !apply {
 				break
 			}
@@ -965,6 +977,12 @@ func extractTarPass(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 			// the pre-existing inode.
 			if _, ours := created[source]; !ours {
 				return nil, fmt.Errorf("tar hardlink %q -> %q: the source is not a member of this archive", hdr.Name, hdr.Linkname)
+			}
+			if err := layout.parents(srcComps, false); err != nil {
+				return nil, fmt.Errorf("tar hardlink %q -> %q: %w", hdr.Name, hdr.Linkname, err)
+			}
+			if err := layout.place(comps, layout.kindOf(srcComps)); err != nil {
+				return nil, fmt.Errorf("tar entry %q: %w", hdr.Name, err)
 			}
 			if !apply {
 				created[target] = struct{}{}

@@ -115,6 +115,37 @@ func TestDownloadWithExtractRefusalLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+// An archive refused because a member is reached through a symlink the SAME
+// archive creates is refused before anything is written: the member before it
+// is not unpacked and a pre-existing file of that name is not replaced.
+func TestExtractTarRefusesMemberThroughOwnSymlinkBeforeWriting(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "dest")
+	if err := os.MkdirAll(filepath.Join(dest, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "sub", "a.txt"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := tarBytes(t, func(tw *tar.Writer) {
+		body := []byte("replaced")
+		_ = tw.WriteHeader(&tar.Header{Name: "sub/", Typeflag: tar.TypeDir, Mode: 0o755})
+		_ = tw.WriteHeader(&tar.Header{Name: "sub/a.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))})
+		_, _ = tw.Write(body)
+		_ = tw.WriteHeader(&tar.Header{Name: "d", Typeflag: tar.TypeSymlink, Linkname: "sub"})
+		_ = tw.WriteHeader(&tar.Header{Name: "d/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))})
+		_, _ = tw.Write(body)
+	})
+	if err := extractTar(r, "https://example/pkg.tar", dest); err == nil {
+		t.Fatal("a member reached through the archive's own symlink was accepted")
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "sub", "a.txt")); err != nil || string(got) != "original" {
+		t.Errorf("sub/a.txt = %q, err = %v; the refused archive replaced it", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, "d")); err == nil {
+		t.Error("the refused archive created its symlink")
+	}
+}
+
 // The judging pass must not change what a good archive unpacks to, including
 // a hardlink to an earlier member.
 func TestExtractTarJudgedArchiveStillUnpacksHardlinks(t *testing.T) {

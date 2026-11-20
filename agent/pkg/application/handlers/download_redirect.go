@@ -18,6 +18,10 @@ import (
 // that downgrades from https; the download itself still follows the redirect,
 // which is what an artifact registry handing out a presigned object-storage
 // URL needs. dropped reports whether that happened, for the command result.
+//
+// The client also sends no Referer on any redirect, with or without operator
+// headers: net/http fills it with the previous URL, query included, and a
+// download URL's query routinely carries a resolved secret too.
 func newDownloadFileClient(timeout time.Duration, headers map[string]string) (client *http.Client, dropped func() bool) {
 	var didDrop bool
 	client = &http.Client{
@@ -27,6 +31,7 @@ func newDownloadFileClient(timeout time.Duration, headers map[string]string) (cl
 			if len(via) >= 10 {
 				return errors.New("stopped after 10 redirects")
 			}
+			req.Header.Del("Referer")
 			if len(headers) == 0 || sameDownloadOrigin(via[0].URL, req.URL) {
 				return nil
 			}

@@ -434,7 +434,7 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 			if err := h.lockManagedUser(rootPath, u.Username, &st); err != nil {
 				return report, fmt.Errorf("failed to lock %s: %w", u.Username, err)
 			}
-			terminated += h.endManagedUserSessions(rootPath, u.Username)
+			terminated += endSessionsOnce(&st, func() (int, bool) { return h.endManagedUserSessions(rootPath, u.Username) })
 			if !wasLocked {
 				locked = append(locked, u.Username)
 			}
@@ -447,6 +447,7 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 				unlocked = append(unlocked, u.Username)
 			}
 			st.Locked = false
+			st.SessionsEnded = false
 		}
 		state.Users[u.Username] = st
 	}
@@ -509,8 +510,9 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 // Revocation here means: empty the key file, drop our sudo grant, empty the
 // principals file, and lock the account. It never deletes the user or its home
 // directory — an access entry removed by accident should cost a login, not data.
-// What the user still has running is ended on every pass, not only on the
-// first lock, so a user locked before that step existed is covered too.
+// What the user still has running is ended once per lock, tracked by
+// SessionsEnded rather than by Locked, so a user locked before that step
+// existed is still covered once.
 //
 // The candidate list comes from the managed GROUP, not from our state file.
 // The state file is documented as losable, and deriving revocation from it meant
@@ -584,7 +586,7 @@ func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConf
 			}
 			locked = append(locked, username)
 		}
-		terminated += h.endManagedUserSessions(rootPath, username)
+		terminated += endSessionsOnce(&st, func() (int, bool) { return h.endManagedUserSessions(rootPath, username) })
 		st.Locked = true
 		state.Users[username] = st
 	}
@@ -936,20 +938,25 @@ func (h *CommandHandler) lockManagedUser(rootPath, username string, st *accessUs
 }
 
 // endManagedUserSessions ends what a locked or revoked managed user still has
-// running on the LIVE root and returns how many processes it killed. A
-// mounted offline root has nothing running, so it is a no-op there. Failures
-// are logged, never returned: the login is already blocked by the time this
-// runs, and a logind that is absent or refuses must not undo that by failing
-// the reconcile.
-func (h *CommandHandler) endManagedUserSessions(rootPath, username string) int {
+// running on the LIVE root and returns how many processes it killed, and
+// whether the teardown is complete (nothing of the user's left), so the caller
+// runs it once per lock and retries only an incomplete one. A mounted offline
+// root has nothing running, so it is a no-op there and not complete: the live
+// root is torn down when it next applies. Failures are logged, never returned:
+// the login is already blocked by the time this runs, and a logind that is
+// absent or refuses must not undo that by failing the reconcile.
+func (h *CommandHandler) endManagedUserSessions(rootPath, username string) (killed int, done bool) {
 	if rootPath != "/" {
-		return 0
+		return 0, false
 	}
 	uid, err := h.userUID(rootPath, username)
 	if err != nil {
 		h.logger.Warn("cannot end sessions: uid unknown", "username", username, "error", err)
-		return 0
+		return 0, false
 	}
+	// sd_booted(3): systemd manages the host when this directory exists.
+	_, sdErr := os.Stat("/run/systemd/system")
+	scope := teardownScope{procRoot: "/proc", self: os.Getpid(), systemd: sdErr == nil}
 	res, err := endUserSessions(username, uid, userTeardownOps{
 		loginctl: func(args ...string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -960,7 +967,7 @@ func (h *CommandHandler) endManagedUserSessions(rootPath, username string) int {
 			}
 			return nil
 		},
-		listPIDs: func(uid int) []int { return pidsOwnedBy("/proc", uid, os.Getpid()) },
+		listPIDs: scope.pidsOwnedBy,
 		kill:     func(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) },
 		settle:   func() { time.Sleep(200 * time.Millisecond) },
 	})
@@ -973,7 +980,7 @@ func (h *CommandHandler) endManagedUserSessions(rootPath, username string) int {
 	if res.Killed > 0 {
 		h.logger.Info("ended the running processes of a locked user", "username", username, "killed", res.Killed)
 	}
-	return res.Killed
+	return res.Killed, err == nil
 }
 
 // unlockManagedUser reverses lockManagedUser, restoring the shell the user

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,5 +86,29 @@ func TestTargetDeviceHoldersFreeDisk(t *testing.T) {
 	// Unreadable sources are not a refusal on their own.
 	if held := targetDeviceHolders(filepath.Join(sys, "absent"), filepath.Join(sys, "absent"), "/dev/sda"); len(held) != 0 {
 		t.Fatalf("missing sysfs reported as held: %q", held)
+	}
+}
+
+// A busy refusal after a lazy detach names the mount and the likely holder,
+// and is still a refusal of the same kind; any other refusal is untouched.
+func TestExplainBusyAfterLazyUnmount(t *testing.T) {
+	busy := fmt.Errorf("device /dev/mmcblk0 cannot be used for OS installation: %w", errTargetDeviceBusy)
+
+	got := explainBusyAfterLazyUnmount(busy, []string{"/mnt/sdcard"})
+	if !errors.Is(got, errTargetDeviceBusy) {
+		t.Fatalf("the explained error lost its kind: %v", got)
+	}
+	for _, want := range []string{"/mnt/sdcard", "detached lazily", "working directory"} {
+		if !strings.Contains(got.Error(), want) {
+			t.Errorf("message %q does not name %q", got, want)
+		}
+	}
+
+	if got := explainBusyAfterLazyUnmount(busy, nil); got != busy {
+		t.Errorf("no lazy detach: error changed to %v", got)
+	}
+	other := errors.New("device /dev/mmcblk0 is mounted")
+	if got := explainBusyAfterLazyUnmount(other, []string{"/mnt/sdcard"}); got != other {
+		t.Errorf("a non-busy refusal was changed to %v", got)
 	}
 }
