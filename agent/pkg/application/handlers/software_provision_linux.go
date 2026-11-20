@@ -281,7 +281,8 @@ func (h *CommandHandler) handleDownloadFile(commandID string, cmd *proto.Downloa
 	for k, v := range cmd.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: downloadTimeout}).Do(req)
+	client, headersDropped := newDownloadFileClient(downloadTimeout, cmd.Headers)
+	resp, err := client.Do(req)
 	if err != nil {
 		// A transport failure is a *url.Error quoting the WHOLE request URL,
 		// userinfo and query included. The status report is redacted at its
@@ -457,7 +458,11 @@ func (h *CommandHandler) handleDownloadFile(commandID string, cmd *proto.Downloa
 		}
 	}
 
-	h.reportCommandResult(commandID, "success", "file downloaded", map[string]string{"dest_path": destPath})
+	result := map[string]string{"dest_path": destPath}
+	if headersDropped() {
+		result["headers_dropped_on_redirect"] = "true"
+	}
+	h.reportCommandResult(commandID, "success", "file downloaded", result)
 	return nil
 }
 
@@ -755,7 +760,33 @@ func extractTarInto(rootFD int, r io.Reader, sourceURL, dir string, protected fu
 // from a pre-existing alias to something outside the tree.
 // governingIDs, when set, refuses any entry whose path crosses an existing
 // directory that is a governing directory under another name (walkAnchored).
+//
+// A refused archive leaves nothing behind: when r can be rewound (the
+// download path hands over its staging descriptor) the whole archive is read
+// and judged once WITHOUT writing — every name, link target, hardlink source,
+// protected-name check, entry and byte cap, and the decoder's completion —
+// and only an archive that passes is unpacked. Refusals that depend on the
+// destination's own state (a symlinked or aliased component met during the
+// walk) can still stop the unpack part-way.
 func extractTarIntoTracked(rootFD int, r io.Reader, sourceURL, dir string, protected func(string) error, governingIDs map[fileIdentity]string) (map[string]struct{}, error) {
+	if rs, ok := r.(io.ReadSeeker); ok {
+		start, err := rs.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, fmt.Errorf("cannot rewind the archive: %w", err)
+		}
+		if _, err := extractTarPass(rootFD, rs, sourceURL, dir, protected, governingIDs, false); err != nil {
+			return nil, err
+		}
+		if _, err := rs.Seek(start, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("cannot rewind the archive: %w", err)
+		}
+	}
+	return extractTarPass(rootFD, r, sourceURL, dir, protected, governingIDs, true)
+}
+
+// extractTarPass reads the archive once. With apply unset it only judges it:
+// nothing below rootFD is created, opened or unlinked.
+func extractTarPass(rootFD int, r io.Reader, sourceURL, dir string, protected func(string) error, governingIDs map[fileIdentity]string, apply bool) (map[string]struct{}, error) {
 	created := map[string]struct{}{}
 	// The decoder is chosen from the URL's path extension (decoder_bounds.go)
 	// and, once tar has seen its end marker, run to COMPLETION before the
@@ -815,8 +846,8 @@ func extractTarIntoTracked(rootFD int, r io.Reader, sourceURL, dir string, prote
 		mode := os.FileMode(hdr.Mode).Perm() & 0o777
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if len(comps) == 0 {
-				continue // the root itself
+			if len(comps) == 0 || !apply {
+				continue // the root itself, or a judging pass
 			}
 			fd, created, err := walkAnchored(rootFD, cleanDir, comps, true, governingIDs)
 			if err != nil {
@@ -831,6 +862,18 @@ func extractTarIntoTracked(rootFD int, r io.Reader, sourceURL, dir string, prote
 		case tar.TypeReg:
 			if len(comps) == 0 {
 				return nil, fmt.Errorf("tar entry %q is not a file name", hdr.Name)
+			}
+			if !apply {
+				created[target] = struct{}{}
+				written, err := io.Copy(io.Discard, io.LimitReader(tr, maxExtractBytes-totalBytes+1))
+				if err != nil {
+					return nil, err
+				}
+				totalBytes += written
+				if totalBytes > maxExtractBytes {
+					return nil, fmt.Errorf("archive exceeds the %d-byte extraction cap", int64(maxExtractBytes))
+				}
+				break
 			}
 			name := comps[len(comps)-1]
 			parentFD, _, err := walkAnchored(rootFD, cleanDir, comps[:len(comps)-1], true, governingIDs)
@@ -876,6 +919,9 @@ func extractTarIntoTracked(rootFD int, r io.Reader, sourceURL, dir string, prote
 			if resolved != cleanDir && !strings.HasPrefix(resolved, cleanDir+string(os.PathSeparator)) {
 				return nil, fmt.Errorf("tar symlink %q -> %q escapes destination", hdr.Name, linkTarget)
 			}
+			if !apply {
+				break
+			}
 			name := comps[len(comps)-1]
 			parentFD, _, err := walkAnchored(rootFD, cleanDir, comps[:len(comps)-1], true, governingIDs)
 			if err != nil {
@@ -919,6 +965,10 @@ func extractTarIntoTracked(rootFD int, r io.Reader, sourceURL, dir string, prote
 			// the pre-existing inode.
 			if _, ours := created[source]; !ours {
 				return nil, fmt.Errorf("tar hardlink %q -> %q: the source is not a member of this archive", hdr.Name, hdr.Linkname)
+			}
+			if !apply {
+				created[target] = struct{}{}
+				break
 			}
 			srcParentFD, _, err := walkAnchored(rootFD, cleanDir, srcComps[:len(srcComps)-1], false, governingIDs)
 			if err != nil {

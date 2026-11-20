@@ -212,3 +212,69 @@ func TestOneShotClientsDoNotAccumulateConnections(t *testing.T) {
 		t.Fatalf("%d connections still open after six one-shot requests, want 0", counter.get())
 	}
 }
+
+// The previous install must stop being bootable BEFORE the stream starts, and
+// durably: a hard reset mid-write never reaches the deferred invalidation, and
+// a previous partition table over a half-written image hangs the board in
+// initramfs instead of letting the ROM fall through to the next boot device.
+func TestDisarmTargetBeforeWriteClearsBothPartitionTables(t *testing.T) {
+	const deviceSize = 32 << 20
+	path := filepath.Join(t.TempDir(), "device.img")
+	marker := make([]byte, deviceSize)
+	for i := range marker {
+		marker[i] = 0xAA
+	}
+	if err := os.WriteFile(path, marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	if err := disarmTargetBeforeWrite(f); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != deviceSize {
+		t.Fatalf("device size changed: %d", len(after))
+	}
+	for i := 0; i < imageHeadSize; i++ {
+		if after[i] != 0 {
+			t.Fatalf("head byte %d = %#x, want 0", i, after[i])
+		}
+	}
+	for i := deviceSize - (1 << 20); i < deviceSize; i++ {
+		if after[i] != 0 {
+			t.Fatalf("backup GPT byte %d = %#x, want 0", i, after[i])
+		}
+	}
+	if after[imageHeadSize] != 0xAA || after[deviceSize/2] != 0xAA {
+		t.Fatal("disarm touched more than the partition tables")
+	}
+}
+
+// A device smaller than the head is cleared without growing (a block device
+// cannot grow, and the write would fail with ENOSPC).
+func TestDisarmTargetBeforeWriteTinyDevice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiny.img")
+	if err := os.WriteFile(path, []byte{1, 2, 3, 4}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := disarmTargetBeforeWrite(f); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(path)
+	if len(after) != 4 || after[0] != 0 || after[3] != 0 {
+		t.Fatalf("tiny device = %v, want four zero bytes", after)
+	}
+}

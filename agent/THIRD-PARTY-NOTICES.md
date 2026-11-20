@@ -17,12 +17,12 @@ licensed under the Apache License 2.0 (`LICENSE`); see `NOTICE`.
 | `github.com/google/uuid` | v1.6.0 | BSD-3-Clause | [T4](#t4) |
 | `github.com/klauspost/compress` | v1.20.4 | Apache-2.0 | [T5](#t5) |
 | `github.com/ulikunitz/xz` | v0.5.17 | BSD-3-Clause | [T6](#t6) |
-| `github.com/warthog618/go-gpiocdev` | v0.9.1 | MIT | [T7](#t7) |
+| `github.com/warthog618/go-gpiocdev` | v0.10.0 | MIT | [T7](#t7) |
 | `golang.org/x/net` | v0.63.0 | BSD-3-Clause | [T1](#t1) |
 | `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | [T1](#t1) |
 | `golang.org/x/text` | v0.44.0 | BSD-3-Clause | [T1](#t1) |
-| `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260526163538-3dc84a4a5aaa | Apache-2.0 | [T8](#t8) |
-| `google.golang.org/grpc` | v1.83.2 | Apache-2.0 + NOTICE | [T8](#t8), [T9](#t9) |
+| `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260817212433-ac3dfec99bb1 | Apache-2.0 | [T8](#t8) |
+| `google.golang.org/grpc` | v1.85.0 | Apache-2.0 + NOTICE | [T8](#t8), [T9](#t9) |
 | `google.golang.org/protobuf` | v1.36.12 | BSD-3-Clause | [T10](#t10) |
 
 ## Licence and notice texts
@@ -505,7 +505,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### T7
 
-Carried by: `github.com/warthog618/go-gpiocdev@v0.9.1`.
+Carried by: `github.com/warthog618/go-gpiocdev@v0.10.0`.
 
 ~~~~text
 MIT License
@@ -533,7 +533,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### T8
 
-Carried by: `google.golang.org/genproto/googleapis/rpc@v0.0.0-20260526163538-3dc84a4a5aaa`, `google.golang.org/grpc@v1.83.2`.
+Carried by: `google.golang.org/genproto/googleapis/rpc@v0.0.0-20260817212433-ac3dfec99bb1`, `google.golang.org/grpc@v1.85.0`.
 
 ~~~~text
                                  Apache License
@@ -741,7 +741,7 @@ Carried by: `google.golang.org/genproto/googleapis/rpc@v0.0.0-20260526163538-3dc
 
 ### T9
 
-Carried by: `google.golang.org/grpc@v1.83.2`.
+Carried by: `google.golang.org/grpc@v1.85.0`.
 
 ~~~~text
 Copyright 2014 gRPC authors.

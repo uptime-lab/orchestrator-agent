@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
 
 	"agent/pkg/pkgver"
 )
@@ -39,4 +40,24 @@ func checkUpdatePolicy(running, requested, declared string, allowDowngrade bool)
 		return fmt.Errorf("package version %s is older than the running agent %s — refusing rollback (set allow_downgrade to override)", target, running)
 	}
 	return nil
+}
+
+// alreadyRunning reports whether installing target would reinstall the very
+// agent that is running. update_agent then succeeds without installing or
+// restarting anything: a restart for nothing abandons every command queued
+// behind it. The comparison is exact (a leading "v" aside), so a pre-release or
+// snapshot of the same number is still a different build. A dev build carries
+// no meaningful version and never matches, "latest" is judged only once the
+// package's declared version is known, and force — the operator's explicit
+// override (allow_downgrade) — always reinstalls.
+func alreadyRunning(running, target string, force bool) bool {
+	if force {
+		return false
+	}
+	norm := func(v string) string { return strings.TrimPrefix(strings.TrimSpace(v), "v") }
+	r, t := norm(running), norm(target)
+	if r == "" || r == "0.0.0" || t == "" || t == "latest" {
+		return false
+	}
+	return r == t
 }

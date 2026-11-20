@@ -11,6 +11,7 @@ package main
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha512"
 	"crypto/x509"
@@ -143,6 +144,11 @@ func loadPub(path string) *ecdsa.PublicKey {
 	pub, ok := k.(*ecdsa.PublicKey)
 	if !ok {
 		fatal("not an ECDSA public key")
+	}
+	// The scheme is ECDSA P-384 over SHA-384; a key on another curve is not
+	// one the agent or the server would accept.
+	if pub.Curve != elliptic.P384() {
+		fatal("not an ECDSA P-384 public key")
 	}
 	return pub
 }

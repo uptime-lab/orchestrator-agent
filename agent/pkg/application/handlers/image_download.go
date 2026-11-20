@@ -6,6 +6,7 @@ package handlers
 // most worth testing without hardware.
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -80,6 +81,46 @@ func imageDownloadClient() *http.Client {
 // text-redaction helper beside it dropped it.
 func redactURL(raw string) string {
 	return redact.URL(raw)
+}
+
+// disarmTargetBeforeWrite makes the target unbootable, durably, BEFORE the
+// first byte of a new image lands on it: the head region (the MBR or
+// protective MBR, the primary GPT and the first partition's boot record) and
+// the device-end backup GPT are zeroed and the device is synced.
+//
+// The deferred invalidateTargetDevice covers every failure the agent lives to
+// see. A power cut or a hard reset is not one of them: it leaves the previous
+// install's partition table pointing into a half-written image, the boot ROM
+// hands control to it, and the board hangs in initramfs instead of falling
+// through BOOT_ORDER to the next device. With the head already gone, a reset
+// at any point of the stream leaves a disk the ROM skips. The image's own head
+// is still written last, after the digest matches, so the disk becomes
+// bootable exactly when it holds a verified image.
+//
+// Unlike the post-failure invalidation this one is fatal: an install that
+// cannot write zeros will not write an image either, and must not start.
+func disarmTargetBeforeWrite(deviceFile *os.File) error {
+	const tailZone = 1 << 20
+	size, err := deviceFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		return fmt.Errorf("cannot determine the target size: %w", err)
+	}
+	head := int64(imageHeadSize)
+	if size > 0 && size < head {
+		head = size
+	}
+	if _, err := deviceFile.WriteAt(make([]byte, head), 0); err != nil {
+		return fmt.Errorf("cannot clear the target's partition table: %w", err)
+	}
+	if size > int64(imageHeadSize)+tailZone {
+		if _, err := deviceFile.WriteAt(make([]byte, tailZone), size-tailZone); err != nil {
+			return fmt.Errorf("cannot clear the target's backup partition table: %w", err)
+		}
+	}
+	if err := deviceFile.Sync(); err != nil {
+		return fmt.Errorf("cannot sync the cleared partition table: %w", err)
+	}
+	return nil
 }
 
 // invalidateTargetDevice makes the target deliberately unbootable after a

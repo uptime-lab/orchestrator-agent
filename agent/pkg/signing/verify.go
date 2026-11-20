@@ -9,6 +9,7 @@ package signing
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha512"
 	"crypto/x509"
 	"embed"
@@ -22,6 +23,20 @@ var keyFS embed.FS
 
 // ErrUntrusted means the signature did not match any embedded trusted key.
 var ErrUntrusted = errors.New("agent artifact signature does not match any trusted key")
+
+// ErrNotP384 means a trusted key is ECDSA on a curve other than P-384. The
+// signature scheme is ECDSA P-384 over SHA-384; a key on another curve is a
+// misconfigured trust set, and verification refuses rather than accepting a
+// signature made under a weaker or unexpected curve.
+var ErrNotP384 = errors.New("trusted signing key is not ECDSA P-384")
+
+// requireP384 refuses a key whose curve is not P-384.
+func requireP384(k *ecdsa.PublicKey) error {
+	if k == nil || k.Curve != elliptic.P384() {
+		return ErrNotP384
+	}
+	return nil
+}
 
 // trustedKeys parses every embedded trusted public key. An empty or malformed set
 // is a build-time mistake and is surfaced as an error (fail-closed).
@@ -51,6 +66,9 @@ func trustedKeys() ([]*ecdsa.PublicKey, error) {
 		if !ok {
 			return nil, fmt.Errorf("key %s is not ECDSA", e.Name())
 		}
+		if err := requireP384(ec); err != nil {
+			return nil, fmt.Errorf("key %s: %w", e.Name(), err)
+		}
 		keys = append(keys, ec)
 	}
 	if len(keys) == 0 {
@@ -70,10 +88,16 @@ func VerifyDetached(data, sig []byte) error {
 	return verifyWithKeys(keys, data, sig)
 }
 
-// verifyWithKeys is the multi-trust core: accept if sig matches ANY key.
+// verifyWithKeys is the multi-trust core: accept if sig matches ANY key. A key
+// that is not P-384 refuses the whole verification (fail-closed).
 func verifyWithKeys(keys []*ecdsa.PublicKey, data, sig []byte) error {
 	if len(sig) == 0 {
 		return errors.New("empty signature")
+	}
+	for _, k := range keys {
+		if err := requireP384(k); err != nil {
+			return err
+		}
 	}
 	digest := sha512.Sum384(data)
 	for _, k := range keys {

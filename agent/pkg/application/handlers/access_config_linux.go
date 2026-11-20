@@ -4,6 +4,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	proto "agent/pkg/infrastructure/grpc/proto"
 	"agent/pkg/infrastructure/hardware"
@@ -284,6 +286,7 @@ func containsString(list []string, want string) bool {
 func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec, state *accessState) (map[string]string, error) {
 	report := map[string]string{"generation": spec.ConfigHash}
 	var created, updated, locked, unlocked, skipped []string
+	terminated := 0
 
 	// Phase 1 — the fence must exist before anything joins it.
 	if err := h.ensureManagedGroup(rootPath); err != nil {
@@ -431,6 +434,7 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 			if err := h.lockManagedUser(rootPath, u.Username, &st); err != nil {
 				return report, fmt.Errorf("failed to lock %s: %w", u.Username, err)
 			}
+			terminated += h.endManagedUserSessions(rootPath, u.Username)
 			if !wasLocked {
 				locked = append(locked, u.Username)
 			}
@@ -454,7 +458,8 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 	// working forever — the exact revocation hole this feature exists to close.
 	// They are locked, never deleted: an entry removed by mistake must not cost
 	// anyone their home directory.
-	departed, err := h.reconcileDepartedUsers(rootPath, spec, state)
+	departed, departedTerminated, err := h.reconcileDepartedUsers(rootPath, spec, state)
+	terminated += departedTerminated
 	if err != nil {
 		return report, fmt.Errorf("failed to revoke departed users: %w", err)
 	}
@@ -485,6 +490,7 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 	report["sshd_reloaded"] = strconv.FormatBool(reloaded)
 	report["sshd_config_mode"] = mode
 	report["cas_trusted"] = strconv.Itoa(len(spec.CAs))
+	report["processes_terminated"] = strconv.Itoa(terminated)
 	report["noop"] = "false"
 	// A skipped user means this configuration was not fully applied. Recording
 	// the generation as clean would make the next delivery of the same config a
@@ -503,13 +509,15 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 // Revocation here means: empty the key file, drop our sudo grant, empty the
 // principals file, and lock the account. It never deletes the user or its home
 // directory — an access entry removed by accident should cost a login, not data.
+// What the user still has running is ended on every pass, not only on the
+// first lock, so a user locked before that step existed is covered too.
 //
 // The candidate list comes from the managed GROUP, not from our state file.
 // The state file is documented as losable, and deriving revocation from it meant
 // a wiped /var/lib left departed users with working keys forever — the exact hole
 // this function exists to close. Group membership is the authority everywhere
 // else in this file, so it is the authority here too.
-func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConfigSpec, state *accessState) ([]string, error) {
+func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConfigSpec, state *accessState) ([]string, int, error) {
 	desired := make(map[string]bool, len(spec.Users))
 	for _, u := range spec.Users {
 		desired[u.Username] = true
@@ -517,7 +525,7 @@ func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConf
 
 	managed, err := h.managedGroupMembers(rootPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list managed users: %w", err)
+		return nil, 0, fmt.Errorf("failed to list managed users: %w", err)
 	}
 	// Users the state file knows about are folded in as well, so one that was
 	// dropped from the group while we were away is still cleaned up.
@@ -529,6 +537,7 @@ func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConf
 	sort.Strings(managed)
 
 	var locked []string
+	terminated := 0
 	for _, username := range managed {
 		if desired[username] {
 			continue
@@ -537,7 +546,7 @@ func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConf
 
 		ours, err := h.userInManagedGroup(rootPath, username)
 		if err != nil {
-			return locked, fmt.Errorf("failed to check group membership for %s: %w", username, err)
+			return locked, terminated, fmt.Errorf("failed to check group membership for %s: %w", username, err)
 		}
 		if !ours {
 			// An operator took this account back from us. Stop tracking; do not
@@ -548,7 +557,7 @@ func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConf
 
 		exists, err := h.userExists(rootPath, username)
 		if err != nil {
-			return locked, fmt.Errorf("failed to check user %s: %w", username, err)
+			return locked, terminated, fmt.Errorf("failed to check user %s: %w", username, err)
 		}
 		if !exists {
 			delete(state.Users, username)
@@ -560,25 +569,26 @@ func (h *CommandHandler) reconcileDepartedUsers(rootPath string, spec accessConf
 		// indistinguishable from never-configured.
 		empty := accessUserSpec{Username: username}
 		if err := h.writeAuthorizedKeys(rootPath, empty, spec.ConfigHash); err != nil {
-			return locked, fmt.Errorf("failed to clear keys for %s: %w", username, err)
+			return locked, terminated, fmt.Errorf("failed to clear keys for %s: %w", username, err)
 		}
 		if err := h.writePrincipals(rootPath, empty); err != nil {
-			return locked, fmt.Errorf("failed to clear principals for %s: %w", username, err)
+			return locked, terminated, fmt.Errorf("failed to clear principals for %s: %w", username, err)
 		}
 		if err := h.reconcileSudo(rootPath, empty, state); err != nil {
-			return locked, fmt.Errorf("failed to revoke sudo for %s: %w", username, err)
+			return locked, terminated, fmt.Errorf("failed to revoke sudo for %s: %w", username, err)
 		}
 
 		if !st.Locked {
 			if err := h.lockManagedUser(rootPath, username, &st); err != nil {
-				return locked, fmt.Errorf("failed to lock departed user %s: %w", username, err)
+				return locked, terminated, fmt.Errorf("failed to lock departed user %s: %w", username, err)
 			}
 			locked = append(locked, username)
 		}
+		terminated += h.endManagedUserSessions(rootPath, username)
 		st.Locked = true
 		state.Users[username] = st
 	}
-	return locked, nil
+	return locked, terminated, nil
 }
 
 // encodeList renders a list for the command result map (values are strings).
@@ -923,6 +933,47 @@ func (h *CommandHandler) lockManagedUser(rootPath, username string, st *accessUs
 		h.logger.Warn("failed to set nologin shell", "username", username, "error", err, "stderr", stderr.String())
 	}
 	return nil
+}
+
+// endManagedUserSessions ends what a locked or revoked managed user still has
+// running on the LIVE root and returns how many processes it killed. A
+// mounted offline root has nothing running, so it is a no-op there. Failures
+// are logged, never returned: the login is already blocked by the time this
+// runs, and a logind that is absent or refuses must not undo that by failing
+// the reconcile.
+func (h *CommandHandler) endManagedUserSessions(rootPath, username string) int {
+	if rootPath != "/" {
+		return 0
+	}
+	uid, err := h.userUID(rootPath, username)
+	if err != nil {
+		h.logger.Warn("cannot end sessions: uid unknown", "username", username, "error", err)
+		return 0
+	}
+	res, err := endUserSessions(username, uid, userTeardownOps{
+		loginctl: func(args ...string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "loginctl", args...).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		},
+		listPIDs: func(uid int) []int { return pidsOwnedBy("/proc", uid, os.Getpid()) },
+		kill:     func(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) },
+		settle:   func() { time.Sleep(200 * time.Millisecond) },
+	})
+	for _, w := range res.Warnings {
+		h.logger.Info("session teardown step did not apply", "username", username, "detail", w)
+	}
+	if err != nil {
+		h.logger.Warn("session teardown incomplete", "username", username, "error", err)
+	}
+	if res.Killed > 0 {
+		h.logger.Info("ended the running processes of a locked user", "username", username, "killed", res.Killed)
+	}
+	return res.Killed
 }
 
 // unlockManagedUser reverses lockManagedUser, restoring the shell the user

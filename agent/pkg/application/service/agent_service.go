@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,8 +132,7 @@ func (s *AgentService) Run(ctx context.Context) error {
 	// agent's own 30s backoff ceiling, and phase-synchronised across a fleet, so a
 	// platform outage returns as a thundering herd. It was also inconsistent with
 	// the agent's own stated policy — isRecoverableError already classifies
-	// codes.Unavailable as recoverable; the initial path simply never asked. One
-	// node was measured restarting 701 times in two hours this way.
+	// codes.Unavailable as recoverable; the initial path simply never asked.
 	if err := s.connectWithRetry(ctx); err != nil {
 		return fmt.Errorf("connection failed: %w", err)
 	}
@@ -333,12 +333,14 @@ func (s *AgentService) connectWithRetry(ctx context.Context) error {
 		}
 		if time.Now().After(deadline) {
 			s.logger.Error("giving up on the initial connection; exiting so the supervisor can restart us",
-				"attempts", attempt, "window", initialConnectWindow.String(), "error", err)
+				append([]any{"attempts", attempt, "window", initialConnectWindow.String(), "error", err},
+					clockHintAttrs(err)...)...)
 			return err
 		}
 
 		s.logger.Warn("initial connection failed; retrying",
-			"attempt", attempt, "retry_in", delay.String(), "error", err)
+			append([]any{"attempt", attempt, "retry_in", delay.String(), "error", err},
+				clockHintAttrs(err)...)...)
 		select {
 		case <-ctx.Done():
 			return err
@@ -351,6 +353,26 @@ func (s *AgentService) connectWithRetry(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// certificateValidityText is the x509 verifier's wording for a certificate
+// outside its validity period. It is matched as text because grpc-go folds the
+// TLS handshake failure into a status message: no typed error survives to
+// errors.As.
+const certificateValidityText = "certificate has expired or is not yet valid"
+
+// clockHintAttrs adds a pointer to the device clock when TLS refused the
+// platform's certificate as outside its validity period. A board without a
+// battery-backed clock boots at a stale time and dials before NTP has set it;
+// the refusal then reads like a PKI fault although it clears by itself once
+// the clock is synchronized. The x509 text already carries the device's time.
+func clockHintAttrs(err error) []any {
+	if err == nil || !strings.Contains(err.Error(), certificateValidityText) {
+		return nil
+	}
+	return []any{"clock_hint", "the device clock is outside the platform certificate's validity period: " +
+		"if the current time in the error is wrong, the clock is not set yet (no battery-backed clock, NTP not synchronized) " +
+		"and this clears once it is; if it is right, the platform's certificate has expired"}
 }
 
 // connect handles the node connection process
@@ -682,8 +704,8 @@ const powerWatchInterval = 60 * time.Second
 // It exists because there is no periodic system_info report at all:
 // reportSystemInfo runs on connect, on reconnect, and from the
 // hardware-info callback after a command that changes hardware state. So
-// `hardware.power` was only ever as fresh as the last of those, and nodes
-// were measured carrying reports 44 minutes stale while up for days.
+// `hardware.power` was only ever as fresh as the last of those, which on a
+// node up for days can be very stale.
 //
 // What that cost is precisely what this poll exists for: a node that sags an hour
 // into its uptime keeps reporting the throttled_flags: 0 captured at connect,

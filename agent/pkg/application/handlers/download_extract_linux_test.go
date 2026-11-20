@@ -67,3 +67,71 @@ func TestDownloadWithExtractUnpacksTheVerifiedArchive(t *testing.T) {
 		}
 	}
 }
+
+// A refused archive leaves the destination as it was: the members that come
+// BEFORE the refused entry are not unpacked either. The archive is judged whole
+// from the staging descriptor before anything is written.
+func TestDownloadWithExtractRefusalLeavesNothingBehind(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "unpacked")
+
+	archive, err := io.ReadAll(tarBytes(t, func(tw *tar.Writer) {
+		body := []byte("fine\n")
+		_ = tw.WriteHeader(&tar.Header{Name: "dir/", Mode: 0o755, Typeflag: tar.TypeDir})
+		_ = tw.WriteHeader(&tar.Header{Name: "dir/ok.txt", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+		_, _ = tw.Write(body)
+		_ = tw.WriteHeader(&tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "dir/ok.txt"})
+		evil := []byte("escaped\n")
+		_ = tw.WriteHeader(&tar.Header{Name: "../../outside.txt", Mode: 0o644, Size: int64(len(evil)), Typeflag: tar.TypeReg})
+		_, _ = tw.Write(evil)
+	}))
+	if err != nil {
+		t.Fatalf("reading the archive bytes: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+
+	h := downloadTestHandler()
+	if err := h.handleDownloadFile("cmd-extract-refused", &proto.DownloadFileCommand{
+		Url:      srv.URL + "/bundle.tar",
+		DestPath: dest,
+		Extract:  true,
+	}); err == nil {
+		t.Fatal("an archive with an escaping member was accepted")
+	}
+
+	entries, err := os.ReadDir(dest)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("the refused archive left %s in the destination", e.Name())
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "outside.txt")); err == nil {
+		t.Fatal("the escaping member was written")
+	}
+}
+
+// The judging pass must not change what a good archive unpacks to, including
+// a hardlink to an earlier member.
+func TestExtractTarJudgedArchiveStillUnpacksHardlinks(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "dest")
+	r := tarBytes(t, func(tw *tar.Writer) {
+		body := []byte("shared")
+		_ = tw.WriteHeader(&tar.Header{Name: "a.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))})
+		_, _ = tw.Write(body)
+		_ = tw.WriteHeader(&tar.Header{Name: "b.txt", Typeflag: tar.TypeLink, Linkname: "a.txt", Mode: 0o644})
+		_ = tw.WriteHeader(&tar.Header{Name: "c", Typeflag: tar.TypeSymlink, Linkname: "a.txt"})
+	})
+	if err := extractTar(r, "https://example/pkg.tar", dest); err != nil {
+		t.Fatalf("a good archive was refused: %v", err)
+	}
+	for _, name := range []string{"a.txt", "b.txt", "c"} {
+		if got, err := os.ReadFile(filepath.Join(dest, name)); err != nil || string(got) != "shared" {
+			t.Errorf("%s = %q, err = %v", name, got, err)
+		}
+	}
+}

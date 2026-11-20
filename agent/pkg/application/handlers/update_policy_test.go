@@ -41,3 +41,30 @@ func TestCheckUpdatePolicy(t *testing.T) {
 		})
 	}
 }
+
+// Updating to the version that is already running is a no-op: no reinstall,
+// no restart that abandons the commands queued behind it.
+func TestAlreadyRunning(t *testing.T) {
+	cases := []struct {
+		name            string
+		running, target string
+		force           bool
+		want            bool
+	}{
+		{"same version", "0.8.1", "0.8.1", false, true},
+		{"same version, v prefix", "0.8.1", "v0.8.1", false, true},
+		{"newer", "0.8.1", "0.8.2", false, false},
+		{"older", "0.8.1", "0.8.0", false, false},
+		{"pre-release of the same number is another build", "0.8.1-rc1", "0.8.1", false, false},
+		{"latest is judged after download", "0.8.1", "latest", false, false},
+		{"dev build always installs", "0.0.0", "0.0.0", false, false},
+		{"unknown running version always installs", "", "0.8.1", false, false},
+		{"explicit override reinstalls", "0.8.1", "0.8.1", true, false},
+		{"path-like garbage is not the running version", "0.8.1", "../../0.8.1", false, false},
+	}
+	for _, tc := range cases {
+		if got := alreadyRunning(tc.running, tc.target, tc.force); got != tc.want {
+			t.Errorf("%s: alreadyRunning(%q, %q, %v) = %v, want %v", tc.name, tc.running, tc.target, tc.force, got, tc.want)
+		}
+	}
+}

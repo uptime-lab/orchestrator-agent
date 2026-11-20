@@ -187,7 +187,14 @@ func (h *CommandHandler) handleRunScript(commandID string, cmd *proto.RunScriptC
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	command := exec.CommandContext(ctx, "/bin/sh", "-c", cmd.Script)
+	// Never `sh -c <script>`: the body carries resolved secrets, and argv is
+	// readable by every local account (newScriptCommand).
+	command, cleanupScript, err := newScriptCommand(ctx, cmd.Script)
+	if err != nil {
+		h.reportCommandResult(commandID, "failed", err.Error(), nil)
+		return err
+	}
+	defer cleanupScript()
 	// Bounded, not a strings.Builder: the result travels in one gRPC frame on
 	// the node's stream, and an oversized frame kills the CONNECTION rather
 	// than the command. See MaxResultOutputBytes for what that cost.

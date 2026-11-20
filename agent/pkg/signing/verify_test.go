@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha512"
+	"errors"
 	"testing"
 )
 
@@ -52,6 +53,34 @@ func TestVerifyWithKeys(t *testing.T) {
 			t.Fatal("want error for empty signature")
 		}
 	})
+}
+
+// A key on another curve must be refused even when the signature under it is
+// mathematically valid: the scheme is ECDSA P-384, and accepting any curve
+// would let a P-256 key in the trust set sign artifacts.
+func TestVerifyRefusesANonP384Key(t *testing.T) {
+	p256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("orchestrator-agent.deb contents")
+	sig := signP384(t, p256, data) // valid ASN.1 ECDSA over SHA-384, on P-256
+
+	digest := sha512.Sum384(data)
+	if !ecdsa.VerifyASN1(&p256.PublicKey, digest[:], sig) {
+		t.Fatal("precondition: the P-256 signature must be valid under its own key")
+	}
+	if err := verifyWithKeys([]*ecdsa.PublicKey{&p256.PublicKey}, data, sig); !errors.Is(err, ErrNotP384) {
+		t.Fatalf("P-256 key: want ErrNotP384, got %v", err)
+	}
+	trust := []*ecdsa.PublicKey{&p384.PublicKey, &p256.PublicKey}
+	if err := verifyWithKeys(trust, data, signP384(t, p384, data)); !errors.Is(err, ErrNotP384) {
+		t.Fatalf("mixed trust set: want ErrNotP384, got %v", err)
+	}
 }
 
 // TestEmbeddedTrustedKeys guards the go:embed set: at least one P-384 key must be

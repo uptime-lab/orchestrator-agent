@@ -212,6 +212,22 @@ func (h *CommandHandler) validateTargetDevice(devicePath string, allowPartitione
 		return fmt.Errorf("device %s is mounted and cannot be used for OS installation", devicePath)
 	}
 
+	// In use without a mount of its own: LUKS/LVM, md or swap. Named first, so
+	// the refusal says what holds the disk; then the kernel's own answer, an
+	// exclusive open, which it refuses while anything claims the disk or one of
+	// its partitions.
+	if held := targetDeviceHolders("/sys/class/block", "/proc/swaps", devicePath); len(held) > 0 {
+		return fmt.Errorf("device %s is in use and cannot be used for OS installation: %s",
+			devicePath, strings.Join(held, "; "))
+	}
+	if f, err := os.OpenFile(devicePath, os.O_RDONLY|syscall.O_EXCL, 0); err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf("device %s is in use (a mounted, device-mapper, md or swap partition holds it) and cannot be used for OS installation", devicePath)
+		}
+	} else {
+		_ = f.Close()
+	}
+
 	// Verify device exists and is accessible
 	if _, err := os.Stat(devicePath); err != nil {
 		return fmt.Errorf("device %s is not accessible: %w", devicePath, err)
@@ -318,6 +334,12 @@ func (h *CommandHandler) downloadAndWriteImageChunked(commandID, imageURL, targe
 		return fmt.Errorf("failed to open device %s: %w", targetDevice, err)
 	}
 	defer deviceFile.Close()
+
+	// The previous install stops being bootable before anything of this one is
+	// written, and durably — a reset mid-stream never reaches a defer.
+	if err := disarmTargetBeforeWrite(deviceFile); err != nil {
+		return fmt.Errorf("failed to prepare %s: %w", targetDevice, err)
+	}
 
 	// Sync every 256MB to keep memory pressure bounded on the netboot
 	// bootstrap while letting the kernel batch writes efficiently.
@@ -1412,6 +1434,12 @@ func (h *CommandHandler) handleUpdateAgent(commandID string, cmd *proto.UpdateAg
 		version = "latest"
 	}
 
+	if alreadyRunning(h.agentVersion, version, cmd.AllowDowngrade) {
+		h.reportCommandStatus(commandID, "success", 100,
+			fmt.Sprintf("Agent is already on %s; nothing to install", h.agentVersion))
+		return nil
+	}
+
 	baseURL := strings.TrimRight(h.adoptionConfig.PlatformURL, "/")
 	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
 		baseURL = "http://" + baseURL
@@ -1487,6 +1515,12 @@ func (h *CommandHandler) handleUpdateAgent(commandID string, cmd *proto.UpdateAg
 	if err := checkUpdatePolicy(h.agentVersion, version, declared, cmd.AllowDowngrade); err != nil {
 		h.reportCommandStatus(commandID, "failed", 0, err.Error())
 		return err
+	}
+	// "latest" is known only now: the same check against the signed bytes.
+	if declared != "" && alreadyRunning(h.agentVersion, declared, cmd.AllowDowngrade) {
+		h.reportCommandStatus(commandID, "success", 100,
+			fmt.Sprintf("Agent is already on %s; nothing to install", h.agentVersion))
+		return nil
 	}
 	if declared != "" {
 		version = declared // the authoritative version, for the success report
@@ -3210,11 +3244,14 @@ func (h *CommandHandler) writeEnvironmentOnRoot(rootPath string, env map[string]
 		return nil
 	}
 
-	// 0600 root:root: the file carries account secrets. pam_env reads it as a
-	// privileged process during session setup, so login environments (shell,
-	// cron, systemd user sessions) are unaffected; an unprivileged tool that
-	// parses /etc/environment directly loses access — accepted, since the
-	// world-readable alternative hands every local user the account's secrets.
+	// 0600 root:root keeps the values from processes that never open a PAM
+	// session (service accounts, daemons, a tool that parses this file). It
+	// does NOT keep them from local users: pam_env reads the file as root
+	// during session setup and exports every line into each session it opens
+	// — ssh, login, su and cron alike — so every account that can log in on
+	// this host, an unprivileged access entry included, sees every value in
+	// its environment. That is the delivery mechanism, not a leak in it; a
+	// value no logged-in user may read does not belong in an env secret.
 	if err := writeFileAtomic(envPath, content, 0o600); err != nil {
 		return err
 	}
