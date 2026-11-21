@@ -1544,10 +1544,11 @@ func (h *CommandHandler) handleUpdateAgent(commandID string, cmd *proto.UpdateAg
 	// updates in a row against a ~50-package run). dpkg has no equivalent of
 	// apt's DPkg::Lock::Timeout, and going through apt-get would put a
 	// dependency resolver between the verified bytes and the install, so the
-	// wait is a bounded retry loop keyed on the lock error text.
+	// wait is a bounded retry loop (packageLockWait: the bound, the progress
+	// reports and the final message naming the holder).
 	h.reportCommandStatus(commandID, "in_progress", 60, "Installing agent package")
 	var stderr bytes.Buffer
-	installOnce := func() error {
+	installOnce := func() (bool, error) {
 		stderr.Reset()
 		var install *exec.Cmd
 		if pkgType == "deb" {
@@ -1556,19 +1557,23 @@ func (h *CommandHandler) handleUpdateAgent(commandID string, cmd *proto.UpdateAg
 			install = exec.Command("rpm", "-U", "--force", tmpFile.Name())
 		}
 		install.Stderr = &stderr
-		return install.Run()
+		if err := install.Run(); err != nil {
+			return pkgType == "deb" && strings.Contains(stderr.String(), "lock"),
+				fmt.Errorf("%v (%s)", err, strings.TrimSpace(stderr.String()))
+		}
+		return false, nil
 	}
-	installErr := installOnce()
-	for lockDeadline := time.Now().Add(5 * time.Minute); installErr != nil &&
-		strings.Contains(stderr.String(), "lock") &&
-		time.Now().Before(lockDeadline); {
-		h.logger.Info("self-update: package manager lock is held, waiting", "stderr", strings.TrimSpace(stderr.String()))
-		h.reportCommandStatus(commandID, "in_progress", 60, "Waiting for the package manager lock")
-		time.Sleep(10 * time.Second)
-		installErr = installOnce()
+	var installErr error
+	if pkgType == "deb" {
+		lockWait := h.packageLockWaitFor(commandID)
+		lockWait.progress = 60
+		installErr = lockWait.run(installOnce)
+	} else {
+		// rpm has no dpkg lock to probe or wait for.
+		_, installErr = installOnce()
 	}
 	if installErr != nil {
-		errMsg := fmt.Sprintf("package install failed: %v (%s)", installErr, strings.TrimSpace(stderr.String()))
+		errMsg := fmt.Sprintf("package install failed: %v", installErr)
 		h.reportCommandStatus(commandID, "failed", 0, errMsg)
 		return errors.New(errMsg)
 	}
@@ -2889,6 +2894,9 @@ func (h *CommandHandler) handleProvisionConnection(commandID string, cmd *proto.
 		return errors.New(errMsg)
 	}
 
+	// Steps skipped without failing the provision, for the success report.
+	var warnings []string
+
 	// If target_device is provided, mount it and provision on that volume
 	if cmd.TargetDevice != "" {
 		// Determine root partition
@@ -2966,7 +2974,9 @@ func (h *CommandHandler) handleProvisionConnection(commandID string, cmd *proto.
 		h.reportCommandStatus(commandID, "in_progress", 50, "Provisioning connection on mounted volume")
 
 		// Provision on mounted volume
-		if err := h.provisionConnectionOnRoot(mountPoint, cmd.Username, cmd.PasswordHash, cmd.SshKey, cmd.SshKeyType, cmd.Env); err != nil {
+		w, err := h.provisionConnectionOnRoot(mountPoint, cmd.Username, cmd.PasswordHash, cmd.SshKey, cmd.SshKeyType, cmd.Env)
+		warnings = w
+		if err != nil {
 			errMsg := fmt.Sprintf("Provision connection failed: %v", err)
 			h.logger.Error("provision connection failed", "command_id", commandID, "error", err)
 			h.reportCommandStatus(commandID, "failed", 0, errMsg)
@@ -2978,7 +2988,9 @@ func (h *CommandHandler) handleProvisionConnection(commandID string, cmd *proto.
 		h.reportCommandStatus(commandID, "in_progress", 50, "Provisioning connection on current filesystem")
 
 		// Provision on current root filesystem (backward compatibility)
-		if err := h.provisionConnectionOnRoot("/", cmd.Username, cmd.PasswordHash, cmd.SshKey, cmd.SshKeyType, cmd.Env); err != nil {
+		w, err := h.provisionConnectionOnRoot("/", cmd.Username, cmd.PasswordHash, cmd.SshKey, cmd.SshKeyType, cmd.Env)
+		warnings = w
+		if err != nil {
 			errMsg := fmt.Sprintf("Provision connection failed: %v", err)
 			h.logger.Error("provision connection failed", "command_id", commandID, "error", err)
 			h.reportCommandStatus(commandID, "failed", 0, errMsg)
@@ -2987,8 +2999,13 @@ func (h *CommandHandler) handleProvisionConnection(commandID string, cmd *proto.
 		}
 	}
 
-	// Report command success
-	h.reportCommandStatus(commandID, "success", 100, "Connection provisioning completed successfully")
+	// Report command success. A step skipped without failing is named here, so
+	// the operator reads it on the command and not only in the device journal.
+	done := "Connection provisioning completed successfully"
+	if len(warnings) > 0 {
+		done = "Connection provisioning completed with a warning: " + strings.Join(warnings, "; ")
+	}
+	h.reportCommandStatus(commandID, "success", 100, done)
 
 	// Final status update
 	h.sendStatusUpdate("online", "Connection provisioning completed successfully")
@@ -3004,7 +3021,10 @@ func (h *CommandHandler) handleProvisionConnection(commandID string, cmd *proto.
 // passwordHash is a crypt(3) `$6$` hash, not a password: the platform hashes
 // server-side so the fleet-wide provisioning default never travels in the clear.
 // Empty means "no password" — a key-only user.
-func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordHash, sshKey, sshKeyType string, env map[string]string) error {
+//
+// The returned warnings name steps that were skipped without failing the
+// provision; the caller puts them in the command's result.
+func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordHash, sshKey, sshKeyType string, env map[string]string) (warnings []string, err error) {
 	// Validate credentials before they reach useradd/usermod/chpasswd. This is
 	// the single chokepoint for all root-filesystem provisioning, so rejecting
 	// hostile values here blocks option injection (a username starting with "-")
@@ -3012,24 +3032,24 @@ func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordH
 	// with `user:value` input would address a DIFFERENT account, not merely set a
 	// bad password).
 	if err := validateProvisionConnectionUsername(username); err != nil {
-		return err
+		return nil, err
 	}
 	if passwordHash != "" && !shadowHashPattern.MatchString(passwordHash) {
-		return fmt.Errorf("the provisioning password hash for %q is not a crypt(3) SHA-512 hash", username)
+		return nil, fmt.Errorf("the provisioning password hash for %q is not a crypt(3) SHA-512 hash", username)
 	}
 	// The key material is checked here too, front-loaded with the rest: a second
 	// line in it would smuggle an extra authorized key, or an extra trusted CA
 	// into /etc/ssh/ca_key.pub, past everything the operator actually granted.
 	if sshKey != "" {
 		if err := validateProvisionSSHKey(sshKey, sshKeyType); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Check if target username already exists
 	targetUserExists, err := h.userExists(rootPath, username)
 	if err != nil {
-		return fmt.Errorf("failed to check if user exists: %w", err)
+		return nil, fmt.Errorf("failed to check if user exists: %w", err)
 	}
 
 	if targetUserExists {
@@ -3049,14 +3069,14 @@ func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordH
 		// Target user doesn't exist, create new user
 		h.logger.Info("target user does not exist, will create new user", "username", username)
 		if err := h.createUserOnRoot(rootPath, username, passwordHash); err != nil {
-			return fmt.Errorf("failed to create user: %w", err)
+			return nil, fmt.Errorf("failed to create user: %w", err)
 		}
 	}
 
 	// 2. Set password if provided
 	if passwordHash != "" {
 		if err := h.setPasswordHashOnRoot(rootPath, username, passwordHash); err != nil {
-			return fmt.Errorf("failed to set password: %w", err)
+			return nil, fmt.Errorf("failed to set password: %w", err)
 		}
 	}
 
@@ -3070,27 +3090,31 @@ func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordH
 		if sshKeyType == "ca" {
 			// CA key: configure in sshd_config for certificate-based auth
 			if err := h.provisionCAKeyOnRoot(rootPath, sshKey); err != nil {
-				return fmt.Errorf("failed to provision CA key: %w", err)
+				return nil, fmt.Errorf("failed to provision CA key: %w", err)
 			}
 		} else {
 			// Regular SSH key: write to user's authorized_keys
 			if err := h.provisionSSHKeyOnRoot(rootPath, username, sshKey); err != nil {
-				return fmt.Errorf("failed to provision SSH key: %w", err)
+				return nil, fmt.Errorf("failed to provision SSH key: %w", err)
 			}
 		}
 	}
 
 	// 4. Enable SSH service and configure password authentication
 	if err := h.configureSSHServiceOnRoot(rootPath); err != nil {
-		return fmt.Errorf("failed to configure SSH service: %w", err)
+		return nil, fmt.Errorf("failed to configure SSH service: %w", err)
 	}
 
 	// 5. Reconcile environment secrets into the target OS (/etc/orchestrator/env,
 	// root only). Called unconditionally: an EMPTY set must still run so that
 	// detaching the last env secret removes it from the device — gating on
 	// len(env) > 0 would make a detached secret immortal there.
-	if err := h.writeEnvironmentOnRoot(rootPath, env); err != nil {
-		return fmt.Errorf("failed to write environment secrets: %w", err)
+	envWarning, err := h.writeEnvironmentOnRoot(rootPath, env)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write environment secrets: %w", err)
+	}
+	if envWarning != "" {
+		warnings = append(warnings, envWarning)
 	}
 
 	// 6. Pre-enable OS-side EEPROM updates so the managed OS can reflash the EEPROM
@@ -3127,7 +3151,7 @@ func (h *CommandHandler) provisionConnectionOnRoot(rootPath, username, passwordH
 		h.logger.Warn("failed to enable systemd-networkd on target OS", "error", err)
 	}
 
-	return nil
+	return warnings, nil
 }
 
 // maskEEPROMAutoUpdateOnRoot masks the distro's automatic EEPROM update units
@@ -3213,13 +3237,20 @@ func (h *CommandHandler) enableEEPROMUpdatesOnRoot(rootPath string) error {
 // agents left in /etc/environment (see reconcileEnvSecretsOnRoot). An empty set
 // is a real input: it removes the file, which is how the last detached secret
 // leaves the device.
-func (h *CommandHandler) writeEnvironmentOnRoot(rootPath string, env map[string]string) error {
-	if err := reconcileEnvSecretsOnRoot(rootPath, env); err != nil {
-		return err
+//
+// The returned warning is non-empty when the legacy cleanup was skipped (see
+// reconcileEnvSecretsOnRoot); the delivery itself succeeded.
+func (h *CommandHandler) writeEnvironmentOnRoot(rootPath string, env map[string]string) (string, error) {
+	warning, err := reconcileEnvSecretsOnRoot(rootPath, env)
+	if err != nil {
+		return "", err
+	}
+	if warning != "" {
+		h.logger.Warn("left /etc/environment unchanged on target OS", "reason", warning)
 	}
 	h.logger.Info("reconciled environment secrets on target OS", "count", len(env),
 		"path", filepath.Join(rootPath, envSecretsRelPath))
-	return nil
+	return warning, nil
 }
 
 // MigrateLegacyEnvironmentSecrets runs once at agent start on the running

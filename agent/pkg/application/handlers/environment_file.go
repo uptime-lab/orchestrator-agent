@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,20 +66,27 @@ func quoteEnvValue(v string) string {
 
 var envValueEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
 
+// errLegacyEnvironmentMarkers marks a /etc/environment whose managed block
+// cannot be identified (a marker without its pair, an end before its begin, or
+// a marker twice). The file is then left exactly as it is.
+var errLegacyEnvironmentMarkers = errors.New("managed block markers are malformed")
+
 // scrubLegacyEnvironment removes every env secret an older agent wrote into
 // /etc/environment and returns the cleaned content plus the set it found in the
 // managed block (the last set that agent applied).
 //
 // What is removed: the managed block, markers included; and, outside it, every
-// line whose key is in that last-applied set or in `incoming` — those are copies
-// merged into the file body by agents that predate the marker. Nothing else is
-// touched: comments, blank lines and an operator's own variables survive
-// byte-for-byte. A pre-marker key that is in neither set cannot be told apart
-// from an operator's line and is left alone.
+// line whose key is in that block's last-applied set — the block itself proves
+// those keys were the agent's, and agents that predate the marker merged the
+// same keys into the file body. Nothing else is touched: comments, blank lines
+// and an operator's own variables survive byte-for-byte. Without a block there
+// is no evidence that any line is the agent's, so the content is returned
+// unchanged, whatever keys are delivered elsewhere: a key the platform also
+// delivers (http_proxy, PATH) may be the operator's own line.
 //
 // Broken or duplicated markers are refused, as patchManagedBlock refuses them:
 // the managed region cannot be identified, so the file is not modified.
-func scrubLegacyEnvironment(original []byte, incoming map[string]string) ([]byte, map[string]string, error) {
+func scrubLegacyEnvironment(original []byte) ([]byte, map[string]string, error) {
 	begin, end := patchMarkerLines(environmentMarker)
 	lines := strings.Split(string(original), "\n")
 
@@ -99,30 +107,35 @@ func scrubLegacyEnvironment(original []byte, incoming map[string]string) ([]byte
 		}
 	}
 	if beginCount > 1 || endCount > 1 {
-		return nil, nil, fmt.Errorf("managed block markers for '%s' appear more than once (%d begin, %d end); refusing to modify the file", environmentMarker, beginCount, endCount)
+		return nil, nil, fmt.Errorf("%w: '%s' appears more than once (%d begin, %d end)", errLegacyEnvironmentMarkers, environmentMarker, beginCount, endCount)
 	}
-	if (beginCount != 0 || endCount != 0) && (beginIdx == -1 || endIdx <= beginIdx) {
-		return nil, nil, fmt.Errorf("managed block markers for '%s' are malformed (begin at line %d, end at line %d); refusing to modify the file", environmentMarker, beginIdx+1, endIdx+1)
+	switch {
+	case beginCount == 0 && endCount == 0:
+	case beginIdx == -1:
+		return nil, nil, fmt.Errorf("%w: '%s' has an end marker at line %d and no begin marker", errLegacyEnvironmentMarkers, environmentMarker, endIdx+1)
+	case endIdx == -1:
+		return nil, nil, fmt.Errorf("%w: '%s' has a begin marker at line %d and no end marker", errLegacyEnvironmentMarkers, environmentMarker, beginIdx+1)
+	case endIdx < beginIdx:
+		return nil, nil, fmt.Errorf("%w: '%s' ends at line %d, before it begins at line %d", errLegacyEnvironmentMarkers, environmentMarker, endIdx+1, beginIdx+1)
+	}
+	if beginIdx == -1 {
+		return original, map[string]string{}, nil
 	}
 
 	applied := map[string]string{}
-	if beginIdx != -1 {
-		for _, line := range lines[beginIdx+1 : endIdx] {
-			if key, value, ok := envAssignment(line); ok {
-				applied[key] = value
-			}
+	for _, line := range lines[beginIdx+1 : endIdx] {
+		if key, value, ok := envAssignment(line); ok {
+			applied[key] = value
 		}
 	}
 
 	kept := make([]string, 0, len(lines))
 	for i, line := range lines {
-		if beginIdx != -1 && i >= beginIdx && i <= endIdx {
+		if i >= beginIdx && i <= endIdx {
 			continue
 		}
 		if key, _, ok := envAssignment(line); ok {
-			_, wasApplied := applied[key]
-			_, isIncoming := incoming[key]
-			if wasApplied || isIncoming {
+			if _, wasApplied := applied[key]; wasApplied {
 				continue
 			}
 		}
@@ -147,14 +160,16 @@ func envAssignment(line string) (key, value string, ok bool) {
 }
 
 // validateEnvSecrets rejects a set that could not be written one assignment per
-// line: a key that is not a shell identifier, or a value carrying a line break.
+// line: a key that is not a shell identifier, or a value carrying a line break
+// or a NUL (which a shell and systemd would each cut short differently). The
+// refusal names the key and never the value: it reaches the command's result.
 func validateEnvSecrets(env map[string]string) error {
 	for name, value := range env {
 		if err := validateEnvName(name); err != nil {
 			return err
 		}
-		if strings.ContainsAny(value, "\n\r") {
-			return fmt.Errorf("invalid value for env %q: must not contain newline characters", name)
+		if strings.ContainsAny(value, "\n\r\x00") {
+			return fmt.Errorf("invalid value for env %q: must not contain newline, carriage return or NUL characters", name)
 		}
 	}
 	return nil
@@ -188,7 +203,7 @@ func writeEnvSecretsOnRoot(rootPath string, env map[string]string) error {
 // rewritten, so a stock /etc/environment keeps its content and its mode; a
 // rewritten one keeps its current mode. No backup copy is made — it would carry
 // the values this exists to remove.
-func scrubLegacyEnvironmentOnRoot(rootPath string, incoming map[string]string) (map[string]string, error) {
+func scrubLegacyEnvironmentOnRoot(rootPath string) (map[string]string, error) {
 	path := filepath.Join(rootPath, legacyEnvironmentRelPath)
 	original, err := os.ReadFile(path)
 	if err != nil {
@@ -197,7 +212,7 @@ func scrubLegacyEnvironmentOnRoot(rootPath string, incoming map[string]string) (
 		}
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
-	cleaned, applied, err := scrubLegacyEnvironment(original, incoming)
+	cleaned, applied, err := scrubLegacyEnvironment(original)
 	if err != nil {
 		return nil, fmt.Errorf("failed to remove env secrets from %s: %w", path, err)
 	}
@@ -217,12 +232,22 @@ func scrubLegacyEnvironmentOnRoot(rootPath string, incoming map[string]string) (
 // reconcileEnvSecretsOnRoot is what every apply runs: the root-only file is
 // written first, so a failure there leaves the device as it was; only then are
 // the legacy copies in /etc/environment removed.
-func reconcileEnvSecretsOnRoot(rootPath string, env map[string]string) error {
+//
+// That removal is cleanup of a file the agent no longer writes, so a block it
+// cannot identify does not fail the apply: /etc/environment is left as it is
+// and the returned warning says why, for the command's result. Any other
+// failure to read or rewrite the file is still an error.
+func reconcileEnvSecretsOnRoot(rootPath string, env map[string]string) (warning string, err error) {
 	if err := writeEnvSecretsOnRoot(rootPath, env); err != nil {
-		return err
+		return "", err
 	}
-	_, err := scrubLegacyEnvironmentOnRoot(rootPath, env)
-	return err
+	if _, err := scrubLegacyEnvironmentOnRoot(rootPath); err != nil {
+		if errors.Is(err, errLegacyEnvironmentMarkers) {
+			return fmt.Sprintf("/%s was left unchanged (%v); remove that block by hand", legacyEnvironmentRelPath, errors.Unwrap(err)), nil
+		}
+		return "", err
+	}
+	return "", nil
 }
 
 // migrateLegacyEnvironmentOnRoot moves a set an older agent left in
@@ -239,7 +264,7 @@ func migrateLegacyEnvironmentOnRoot(rootPath string) (bool, error) {
 		}
 		return false, fmt.Errorf("failed to read %s: %w", path, err)
 	}
-	_, applied, err := scrubLegacyEnvironment(original, nil)
+	_, applied, err := scrubLegacyEnvironment(original)
 	if err != nil {
 		return false, fmt.Errorf("failed to inspect %s: %w", path, err)
 	}
@@ -263,7 +288,7 @@ func migrateLegacyEnvironmentOnRoot(rootPath string) (bool, error) {
 	} else if err != nil {
 		return false, fmt.Errorf("failed to stat %s: %w", filepath.Join(rootPath, envSecretsRelPath), err)
 	}
-	if _, err := scrubLegacyEnvironmentOnRoot(rootPath, nil); err != nil {
+	if _, err := scrubLegacyEnvironmentOnRoot(rootPath); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -215,10 +215,7 @@ func (h *CommandHandler) restoreIdentifyLEDLocked() {
 	if !h.identifySavedValid {
 		return
 	}
-	_ = writeSysfs(filepath.Join(h.identifyLED, "trigger"), h.identifySavedTrigger)
-	if h.identifySavedBrightness != "" {
-		_ = writeSysfs(filepath.Join(h.identifyLED, "brightness"), h.identifySavedBrightness)
-	}
+	restoreSysLED(h.identifyLED, h.identifySavedTrigger, h.identifySavedBrightness, writeSysfs)
 	h.identifySavedValid = false
 }
 
@@ -325,10 +322,17 @@ func (h *CommandHandler) startBlink(led string, neo hardware.NeoPixel, color [3]
 				// above), so a write can never race a close — on BCM2711 that
 				// race read munmapped MMIO and killed the whole process. The
 				// generation check stands the write down once replaced.
-				_ = writeSysfs(filepath.Join(led, "brightness"), val)
+				//
+				// The sysfs write is under the same lock and checks: a tick
+				// that lost the race to a stop or a replace would otherwise
+				// write brightness after the restore, and a brightness of 0
+				// clears the trigger the restore just put back.
 				h.identifyMu.Lock()
-				if h.identifyGen == gen && h.identifyNeo != nil {
-					_ = h.identifyNeo.WriteFrame(identifyNeoLEDCount, r, g, b)
+				if h.identifyGen == gen && ctx.Err() == nil {
+					_ = writeSysfs(filepath.Join(led, "brightness"), val)
+					if h.identifyNeo != nil {
+						_ = h.identifyNeo.WriteFrame(identifyNeoLEDCount, r, g, b)
+					}
 				}
 				h.identifyMu.Unlock()
 			}

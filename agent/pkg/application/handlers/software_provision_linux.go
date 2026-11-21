@@ -85,12 +85,23 @@ func (h *CommandHandler) handleInstallPackages(commandID string, cmd *proto.Inst
 
 	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	var out strings.Builder
+	// One lock-wait budget for the whole command (see packageLockWait).
+	lockWait := h.packageLockWaitFor(commandID)
 	if cmd.Update {
 		h.reportCommandStatus(commandID, "in_progress", 20, "Updating package lists")
 		// DPkg::Lock::Timeout: wait on a held dpkg lock instead of failing
 		// instantly — the unattended_upgrades utility makes apt-daily hold it
 		// at random times fleet-wide.
-		if stdout, err := runWithEnv(env, softwareCmdTimeout, "apt-get", "-o", "DPkg::Lock::Timeout=300", "update"); err != nil {
+		//
+		// Waited for here first, with progress reports and a named holder
+		// (packageLockWait), so apt's own silent wait only covers a race.
+		var stdout string
+		lockWait.locks, lockWait.progress = aptListsLockFiles, 20
+		if err := lockWait.run(func() (bool, error) {
+			var err error
+			stdout, err = runWithEnv(env, softwareCmdTimeout, "apt-get", "-o", "DPkg::Lock::Timeout=300", "update")
+			return err != nil && aptLockBusy(stdout), err
+		}); err != nil {
 			out.WriteString(stdout)
 			// truncateOutput, like the success path below: an unbounded value
 			// here rides one gRPC frame and an oversized frame tears down the
@@ -115,7 +126,13 @@ func (h *CommandHandler) handleInstallPackages(commandID string, cmd *proto.Inst
 	}
 	h.reportCommandStatus(commandID, "in_progress", 50, "Installing packages")
 	args := append([]string{"-o", "DPkg::Lock::Timeout=300", "install", "-y", "--no-install-recommends", "--"}, cmd.Packages...)
-	stdout, err := runWithEnv(env, softwareCmdTimeout, "apt-get", args...)
+	var stdout string
+	lockWait.locks, lockWait.progress = dpkgLockFiles, 50
+	err := lockWait.run(func() (bool, error) {
+		var err error
+		stdout, err = runWithEnv(env, softwareCmdTimeout, "apt-get", args...)
+		return err != nil && aptLockBusy(stdout), err
+	})
 	out.WriteString(stdout)
 	if err != nil {
 		h.reportCommandResult(commandID, "failed", "apt-get install failed: "+err.Error(),
@@ -126,6 +143,13 @@ func (h *CommandHandler) handleInstallPackages(commandID string, cmd *proto.Inst
 	h.reportCommandResult(commandID, "success", "packages installed",
 		map[string]string{"stdout": truncateOutput(out.String())})
 	return nil
+}
+
+// aptLockBusy reports whether apt-get failed because another process held a
+// lock ("Could not get lock /var/lib/dpkg/lock-frontend. It is held by
+// process ..."), as opposed to a real failure.
+func aptLockBusy(output string) bool {
+	return strings.Contains(output, "Could not get lock") || strings.Contains(output, "Unable to acquire the dpkg frontend lock")
 }
 
 // handleManageService writes an optional systemd unit and controls it.
@@ -167,6 +191,14 @@ func (h *CommandHandler) handleManageService(commandID string, cmd *proto.Manage
 		return fmt.Errorf("%s", msg)
 	}
 
+	// The action is validated before anything is written: an unknown action
+	// must leave no unit on disk and no daemon-reload behind.
+	scArgs, err := serviceActionArgs(cmd.Action, name)
+	if err != nil {
+		h.reportCommandResult(commandID, "failed", "unknown action: "+cmd.Action, nil)
+		return err
+	}
+
 	if strings.TrimSpace(cmd.UnitContent) != "" {
 		// Through the same path policy every other file-writing handler uses. The
 		// name guard above already refuses the agent's units; this covers what a
@@ -185,25 +217,6 @@ func (h *CommandHandler) handleManageService(commandID string, cmd *proto.Manage
 			h.reportCommandResult(commandID, "failed", "daemon-reload failed: "+err.Error(), nil)
 			return err
 		}
-	}
-
-	var scArgs [][]string
-	switch cmd.Action {
-	case "enable_now", "":
-		scArgs = [][]string{{"enable", "--now", name}}
-	case "start":
-		scArgs = [][]string{{"start", name}}
-	case "restart":
-		scArgs = [][]string{{"restart", name}}
-	case "stop":
-		scArgs = [][]string{{"stop", name}}
-	case "disable_now":
-		scArgs = [][]string{{"disable", "--now", name}}
-	case "status":
-		scArgs = nil
-	default:
-		h.reportCommandResult(commandID, "failed", "unknown action: "+cmd.Action, nil)
-		return fmt.Errorf("unknown service action %q", cmd.Action)
 	}
 
 	h.reportCommandStatus(commandID, "in_progress", 50, "Applying service action")

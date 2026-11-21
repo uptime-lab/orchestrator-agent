@@ -27,7 +27,7 @@ func TestWriteEnvironmentOnRootDeliversRootOnly(t *testing.T) {
 	}
 
 	h := &CommandHandler{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	if err := h.writeEnvironmentOnRoot(root, map[string]string{"NEW_TOKEN": "v"}); err != nil {
+	if _, err := h.writeEnvironmentOnRoot(root, map[string]string{"NEW_TOKEN": "v"}); err != nil {
 		t.Fatalf("writeEnvironmentOnRoot: %v", err)
 	}
 
@@ -51,7 +51,7 @@ func TestWriteEnvironmentOnRootDeliversRootOnly(t *testing.T) {
 		}
 	}
 
-	if err := h.writeEnvironmentOnRoot(root, nil); err != nil {
+	if _, err := h.writeEnvironmentOnRoot(root, nil); err != nil {
 		t.Fatalf("writeEnvironmentOnRoot (empty): %v", err)
 	}
 	if _, err := os.Stat(secretsPath); !os.IsNotExist(err) {

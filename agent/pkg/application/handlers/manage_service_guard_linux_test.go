@@ -3,7 +3,15 @@
 package handlers
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	proto "agent/pkg/infrastructure/grpc/proto"
 )
 
 // manage_service could write and control the agent's own unit.
@@ -48,5 +56,35 @@ func TestOrdinaryUnitsAreStillAllowed(t *testing.T) {
 		if platformManagedUnit(name) {
 			t.Errorf("manage_service refuses %q, which the platform does not own", name)
 		}
+	}
+}
+
+// An unknown action is refused before the unit is written: nothing lands in
+// /etc/systemd/system and systemd is not reloaded for a command that was never
+// going to run. Without root the old order failed at the write instead, so the
+// reported reason pins the order on either kind of runner.
+func TestManageServiceUnknownActionWritesNothing(t *testing.T) {
+	rec := &recordingPlatformClient{}
+	h := NewCommandHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), rec, "node", "account", "token")
+	name := fmt.Sprintf("orchestrator-test-%d.service", os.Getpid())
+	unitPath := filepath.Join("/etc/systemd/system", name)
+	t.Cleanup(func() { _ = os.Remove(unitPath) })
+
+	err := h.handleManageService("cmd", &proto.ManageServiceCommand{
+		Name:        name,
+		Action:      "create",
+		UnitContent: "[Service]\nExecStart=/bin/true\n",
+	})
+	if err == nil {
+		t.Fatal("expected the unknown action to be refused")
+	}
+	if _, statErr := os.Lstat(unitPath); !os.IsNotExist(statErr) {
+		t.Fatalf("an unknown action left %s on disk (stat err=%v)", unitPath, statErr)
+	}
+	rec.mu.Lock()
+	reported := strings.Join(rec.details, "\n")
+	rec.mu.Unlock()
+	if !strings.Contains(reported, "unknown action: create") || strings.Contains(reported, "failed to write unit") {
+		t.Fatalf("reported %q; want the action refusal before any write", reported)
 	}
 }
