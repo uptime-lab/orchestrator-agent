@@ -33,6 +33,6 @@ func clampCommandDelaySeconds(v uint32) (seconds int, bound bool) {
 // for a reboot delay, because the wire field is an int32 the BACKEND converts
 // from a float64, and that conversion is architecture-dependent: arm64
 // saturates to 2147483647 (a 68-year sleep), amd64 wraps to a negative. So an
-// unclamped value wedges a node on the arm64 install and is harmless on the
-// amd64 one — the failure hides on exactly the install that has hardware.
+// unclamped value wedges a node behind an arm64 backend and is harmless behind
+// an amd64 one — a test against one architecture does not show the failure.
 const maxBlockTimeoutSeconds = 3600

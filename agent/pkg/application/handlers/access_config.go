@@ -73,8 +73,8 @@ type accessUserSpec struct {
 	// PasswordHash is a crypt(3) `$6$` hash, applied with `chpasswd -e`. The
 	// platform hashes server-side and no longer populates the wire's cleartext
 	// `password` field at all, which is why there is no cleartext member here to
-	// fall back to: a shell on one node used to be able to open a stream as that
-	// node and read the account's passwords for every other one.
+	// fall back to: a cleartext field would let a shell on one node open a
+	// stream as that node and read the account's passwords for every other one.
 	PasswordHash   string
 	PasswordAction string // unchanged | set | clear
 	AdoptUnmanaged bool

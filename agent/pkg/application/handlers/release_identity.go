@@ -14,8 +14,8 @@ import (
 // retrying forever against a platform that no longer has a row for it: the
 // adoption file still names a node_id that does not exist, so ConnectionInit is
 // refused, and a network-first device cannot even reach recovery because
-// HTTP-boot withholds an unknown serial. One was found powered and on the network
-// three days after its node was deleted, invisible to the platform.
+// HTTP-boot withholds an unknown serial. Such a device stays powered and on the
+// network, invisible to the platform.
 //
 // Not platform-specific: it removes two files. It lives outside
 // command_handler_linux.go for that reason — a Pi is not the only thing that can

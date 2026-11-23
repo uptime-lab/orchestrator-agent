@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Exit codes of `orchestrator-agent --status` (tracker #15). 78 matches the
+// Exit codes of `orchestrator-agent --status`. 78 matches the
 // interactive-start "not provisioned" code, so a script gets one number for
 // "this machine holds no node identity" from either entry point.
 const (

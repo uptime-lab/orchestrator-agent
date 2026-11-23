@@ -135,11 +135,9 @@ const identifyNeoLEDCount = 8
 // two different things depending on what the node is doing:
 //
 //   - An identify blink is RUNNING: the press IS the acknowledgement — the
-//     human found the machine — so the blink stops. (The first design kept
-//     the blink running on the theory that the press it provoked must not cut
-//     it short; the operator at the rack overruled that: once
-//     you have pressed the button on the blinking machine, the blink has done
-//     its job and further blinking is noise.)
+//     human found the machine — so the blink stops: once the button on the
+//     blinking machine has been pressed, the blink has done its job and
+//     further blinking is noise.
 //   - Nothing is running: a short local ack blink — sys-led AND the digital
 //     LEDs, from the identify spec persisted with the device profile — so the
 //     human gets feedback even when the platform is unreachable.

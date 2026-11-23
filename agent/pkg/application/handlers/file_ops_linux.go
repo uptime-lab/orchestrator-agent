@@ -34,8 +34,8 @@ import (
 const DefaultReadMaxBytes = 512 * 1024
 
 // refusedReadPrefixes is the read side of the same rule. Declared once and
-// shared, because the two lists drifting apart is exactly what C-8 was: a single
-// list means a new prefix cannot be added to one half only.
+// shared, because the two lists drifting apart lets a path refused for writing
+// be read (or the reverse): a single list means a new prefix cannot be added to one half only.
 //
 // The read side is a SUPERSET only in wording: the access reconciler's key,
 // principal and sudoers files are editable-but-protected files that reads are

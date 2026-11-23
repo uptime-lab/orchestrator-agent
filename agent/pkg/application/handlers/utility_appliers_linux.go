@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// The night-spec appliers (docs/UTILITIES-RESEARCH.md): each is
+// The utility appliers (docs/UTILITIES-RESEARCH.md): each is
 // install + render + enable + verify, idempotent, nothing more. Verification
 // is per-case ON PURPOSE — `is-active` alone is the "green unit, black HDMI"
 // bug wearing a different hat (a zram service can be active with no swap
@@ -200,9 +200,9 @@ func (h *CommandHandler) applyKioskUtility(params map[string]interface{}) error 
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("kiosk url must be http(s), got %q", url)
 	}
-	// No fallback image on purpose: the old pinned default is a
-	// private registry devices cannot pull from, so defaulting here turned a
-	// missing param into a guaranteed pull failure. The platform refuses to
+	// No fallback image on purpose: a pinned default image is not
+	// pullable anonymously by every device, so defaulting here would turn a
+	// missing param into a pull failure. The platform refuses to
 	// dispatch an imageless kiosk config; this covers an older backend.
 	image := paramStr(params, "image", "")
 	if image == "" {

@@ -347,13 +347,11 @@ func (r *SystemInfoReader) collectHardwareInfo(ctx context.Context) (*proto.Hard
 	// cannot answer: a zeroed report would say "the supply is fine" about hardware
 	// that has no idea.
 	//
-	// FRESHNESS, because this function is NOT periodic and that surprised
-	// everyone once already. It runs on CONNECT, on RECONNECT, and
-	// from the hardware-info reporter callback after a command that changes
-	// hardware state; the only timers in AgentService are liveness 10s, heartbeat
-	// 30s and the live metrics sample 5s. Measured: two nodes up
-	// 2.4 and 4.5 days carried system_info frozen at a reconnect 44 minutes
-	// earlier.
+	// FRESHNESS, because this function is NOT periodic. It runs on CONNECT, on
+	// RECONNECT, and from the hardware-info reporter callback after a command
+	// that changes hardware state; the only timers in AgentService are liveness
+	// 10s, heartbeat 30s and the live metrics sample 5s. So system_info on a
+	// node with a long-lived stream can be hours or days stale.
 	//
 	// What closes the gap is AgentService.startPowerWatch, which polls ONLY
 	// get_throttled once a minute and calls back here when the mask CHANGES — so

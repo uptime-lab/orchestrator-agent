@@ -525,8 +525,9 @@ func (c *PlatformClient) isRecoverableError(err error) bool {
 		// be told apart here. It is not an immediate reconnect: the receive
 		// loop holds for the long jittered retry (holdAfterDeviceCapRefusal)
 		// with the process still running, and the heartbeat watchdog stands
-		// down for that hold.
-		return st.Message() != deviceCapRefusalMessage
+		// down for that hold. The refusal at the device's ACCOUNT limit is
+		// the same kind of answer with its own fixed message.
+		return !isDeviceLimitMessage(st.Message())
 	case codes.Aborted:
 		// Operation aborted - recoverable
 		return true
@@ -549,6 +550,19 @@ func (c *PlatformClient) isRecoverableError(err error) bool {
 // ResourceExhausted when the install's admitted-device cap is reached; it must
 // byte-match the platform's entitlement.GRPCRefusalMessage.
 const deviceCapRefusalMessage = "device cap reached"
+
+// accountLimitRefusalMessage is the fixed status message the platform sends
+// with ResourceExhausted when the device's ACCOUNT holds as many devices as
+// its own limit allows; it must byte-match the platform's
+// entitlement.GRPCAccountLimitMessage. It is held for like the device cap:
+// only an operator or the account's owner frees a slot.
+const accountLimitRefusalMessage = "account device limit reached"
+
+// isDeviceLimitMessage reports whether a ResourceExhausted message is one of
+// the platform's two admission-limit refusals.
+func isDeviceLimitMessage(msg string) bool {
+	return msg == deviceCapRefusalMessage || msg == accountLimitRefusalMessage
+}
 
 const (
 	// deviceCapHoldBase is how long a device refused at the cap waits before
@@ -573,7 +587,10 @@ func jitteredDeviceCapHold() time.Duration {
 // stays down, and ONE reconnect is scheduled after a long jittered hold. The
 // heartbeat watchdog stands down for the hold (inDeviceCapHold). The first
 // refusal of a streak is one WARN line; the repeats are INFO.
-func (c *PlatformClient) holdAfterDeviceCapRefusal(ctx context.Context) {
+//
+// accountLimit says the refusal was at the device's account limit rather
+// than the install's cap; only the WARN's wording differs.
+func (c *PlatformClient) holdAfterDeviceCapRefusal(ctx context.Context, accountLimit bool) {
 	hold := c.deviceCapHold
 	if hold == nil {
 		hold = jitteredDeviceCapHold
@@ -586,9 +603,13 @@ func (c *PlatformClient) holdAfterDeviceCapRefusal(ctx context.Context) {
 	c.mu.Unlock()
 
 	if refusals == 1 {
-		c.logger.Warn("the platform refused this device: the install is at its device cap. "+
-			"The agent keeps running and asks again periodically; it is admitted once an operator "+
-			"removes a device or applies an entitlement",
+		reason := "the install is at its device cap"
+		if accountLimit {
+			reason = "its account is at its device limit"
+		}
+		c.logger.Warn("the platform refused this device: "+reason+". "+
+			"The agent keeps running and asks again periodically; it is admitted once a device "+
+			"is removed or the limit is raised",
 			"retry_in", d.Round(time.Second).String())
 	} else {
 		c.logger.Info("still refused at the device cap; asking again later",
@@ -641,10 +662,17 @@ func (c *PlatformClient) inDeviceCapHold() bool {
 }
 
 // isDeviceCapRefusal reports whether err is the platform's refusal at its
-// device cap.
+// device cap or at the device's account limit.
 func isDeviceCapRefusal(err error) bool {
 	st, ok := status.FromError(err)
-	return ok && st.Code() == codes.ResourceExhausted && st.Message() == deviceCapRefusalMessage
+	return ok && st.Code() == codes.ResourceExhausted && isDeviceLimitMessage(st.Message())
+}
+
+// isAccountLimitRefusal reports whether err is the platform's refusal at the
+// device's account limit.
+func isAccountLimitRefusal(err error) bool {
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.ResourceExhausted && st.Message() == accountLimitRefusalMessage
 }
 
 // signalDisconnectionIfNeeded checks error and signals controller if reconnection is needed
@@ -693,8 +721,8 @@ func (c *PlatformClient) StartHeartbeat(ctx context.Context, nodeID, accountID, 
 				// Watchdog: still disconnected after two intervals AND the
 				// reconnection loop is idle — a disconnect signal was lost and
 				// nothing else will ever re-signal (send paths never run while
-				// disconnected). Seen in the wild: an agent stranded offline
-				// for hours until a manual restart. A retrying loop is left
+				// disconnected). Otherwise an agent can stay offline until a
+				// manual restart. A retrying loop is left
 				// alone so the nudge cannot invalidate its attempts.
 				// A device held after a device-cap refusal is disconnected on
 				// purpose, and the hold's own timer asks again.
@@ -905,7 +933,7 @@ func (c *PlatformClient) ListenForCommands(ctx context.Context, commandHandler f
 					// the device cap, which only an operator lifts: hold for
 					// the long retry instead.
 					if capRefused {
-						c.holdAfterDeviceCapRefusal(ctx)
+						c.holdAfterDeviceCapRefusal(ctx, isAccountLimitRefusal(result.err))
 					} else {
 						c.signalDisconnectionIfNeeded(result.err)
 					}

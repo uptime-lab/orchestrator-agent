@@ -190,9 +190,8 @@ func (p *Parser) WriteAdoptionFile(filePath string, cfg *node.AdoptionConfig) er
 		if original, readErr := os.ReadFile(filePath); readErr == nil {
 			// REDACTED, not verbatim. The file this replaces normally holds a
 			// MASTER enrolment token — one credential shared by every device a
-			// provisioning card ever touched — and the backup outlived its
-			// purpose: one was found on a device whose hash still matched an
-			// active master_tokens row with expires_at = NULL. What the
+			// provisioning card ever touched, which may never expire — and the
+			// backup is never cleaned up, so it must not carry it. What the
 			// recoverability comment above actually needs is node_id, account_id
 			// and the endpoints; the credential is what makes the file worth
 			// stealing.
@@ -338,8 +337,8 @@ func (p *Parser) EnsureAdoptionFilePermissions(filePath string) {
 // retrying forever against a platform that no longer has a row for it — its
 // adoption file still names a node_id that does not exist, so ConnectionInit is
 // refused, and a network-first device cannot even reach recovery because
-// HTTP-boot withholds an unknown serial. One was found powered and on the
-// network three days after its node was deleted.
+// HTTP-boot withholds an unknown serial. Such a device stays powered and on
+// the network, invisible to the platform.
 //
 // An already-absent file is SUCCESS, not an error. The command is dispatched at
 // the moment a node is deleted and may be redelivered; "there is no identity

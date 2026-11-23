@@ -33,8 +33,8 @@ import (
 // strings.Contains(err, "network is unreachable"), which matches only when the
 // platform is addressed by IP. With a hostname gRPC dies
 // earlier, at DNS, with `name resolver error: produced zero addresses`, so that
-// version never fired at all on such an install — a node was observed restarting 701 times
-// in two hours with the heal present and silent. Matching more strings would not
+// version never fired at all on such an install — a node could crash-loop for
+// hours with the heal present and silent. Matching more strings would not
 // fix it either: grpc-go folds the cause into the status message, *status.Error
 // exposes no Unwrap so errors.As onto *net.OpError / *net.DNSError fails, and
 // status.Code is Unavailable for every variant. The error genuinely cannot say
@@ -171,9 +171,9 @@ func healNetworkIfWedged(sys netHealSystem, logger *slog.Logger) {
 		return
 	}
 
-	// Verify rather than assume. Whether a bare start is enough was an unverified
-	// claim in this file's comments for months; state what actually happened so
-	// the next reader gets an outcome instead of an intention.
+	// Verify rather than assume: whether a bare start is enough is not known in
+	// advance, so log what actually happened and the next reader gets an
+	// outcome instead of an intention.
 	if sys.HasDefaultRoute() {
 		logger.Info("network heal succeeded, host has a default route again")
 		return

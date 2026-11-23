@@ -604,12 +604,11 @@ func (s *AgentService) touchLivenessFile(ctx context.Context) {
 // livenessShouldReport decides whether to keep telling the watchdog daemon this
 // agent is healthy.
 //
-// The file used to be touched unconditionally, from a ticker started before the
-// first connect ever ran. That made the worst failure this fleet has invisible to
-// the one supervisor meant to catch it: a node whose network manager never
-// started crash-looped every 10s for two hours, refreshing the liveness file
-// 12-30x faster than the agent-health preset's 120-300s threshold, so an armed
-// watchdog saw a perfectly healthy agent the whole time.
+// Touching the file unconditionally, from a ticker started before the first
+// connect ever ran, would hide the worst failure from the one supervisor meant
+// to catch it: a node whose network manager never starts crash-loops every 10s,
+// refreshing the liveness file 12-30x faster than the agent-health preset's
+// 120-300s threshold, so an armed watchdog sees a perfectly healthy agent.
 //
 // Withholding it is what makes the watchdog act — and a watchdog reboot is
 // genuinely the right answer there, because the netplan/networkd race is a dice

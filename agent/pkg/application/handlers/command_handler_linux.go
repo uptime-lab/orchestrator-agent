@@ -1180,7 +1180,7 @@ func (h *CommandHandler) handleInstallAgentOnVolume(commandID string, cmd *proto
 	}
 	h.logger.Info("install_on_volume: agent package signature verified", "command_id", commandID)
 
-	// Version binding (L4): the requested version is mandatory here — make
+	// Version binding: the requested version is mandatory here — make
 	// sure the (signed) package actually declares it, so a CDN cannot serve
 	// an older signed artifact under a newer name. No downgrade floor: a
 	// fresh OS install has no running-agent version to protect.
@@ -1367,10 +1367,9 @@ func sameFilesystem(a, b string) (bool, error) {
 // That is worse than a failed command, because ListenForCommands calls handlers
 // INLINE and the same select arm dispatches web-terminal frames. A blocked
 // handler leaves the node ONLINE and HEARTBEATING while accepting nothing —
-// including the terminal you would use to diagnose it. install_os was hardened
-// against exactly this in 0.3.5 and download_file already had it; the agent's
-// own update path never did, which is the path that breaks the ability to ship
-// a fix.
+// including the terminal you would use to diagnose it. install_os and
+// download_file are hardened against exactly this; the agent's own update path
+// needs it most, because it is the path that breaks the ability to ship a fix.
 //
 // An overall Timeout is right for these four, unlike the OS image: they are the
 // agent package (~10 MB), its signature (~100 bytes) and an EEPROM blob (a few
@@ -1519,7 +1518,7 @@ func (h *CommandHandler) handleUpdateAgent(commandID string, cmd *proto.UpdateAg
 	}
 	h.logger.Info("self-update: agent package signature verified")
 
-	// Anti-rollback (L4): the signature proves who BUILT the package, not
+	// Anti-rollback: the signature proves who BUILT the package, not
 	// which version was served — read the version declared inside the signed
 	// bytes and refuse a mismatched artifact or a downgrade without the
 	// explicit override.
@@ -3392,7 +3391,7 @@ func (h *CommandHandler) createUserOnRoot(rootPath, username, passwordHash strin
 // setPasswordHashOnRoot installs an already-hashed password with `chpasswd -e`,
 // which writes the value into /etc/shadow verbatim instead of hashing it.
 //
-// This is how the access config sets passwords now: the platform hashes
+// This is how the access config sets passwords: the platform hashes
 // server-side and never sends the cleartext, because an unprivileged shell on
 // one node could read that node's adoption token, open a stream as it, and be
 // handed the account's cleartext passwords for every node in the account.

@@ -25,7 +25,7 @@ const defaultAdoptionFile = "/mnt/sdcard/node-adoption.txt"
 
 // exitCodeNotProvisioned is the distinct exit code for "no node identity is
 // available here" on an interactive run — sysexits EX_CONFIG, so a script can
-// tell an unprovisioned invocation from a crash (tracker #15). The systemd
+// tell an unprovisioned invocation from a crash. The systemd
 // path keeps exiting 1, unchanged.
 const exitCodeNotProvisioned = 78
 
@@ -90,8 +90,8 @@ func main() {
 	flag.BoolVar(&showStatus, "status", false, "Print a local diagnostic (identity, service, process) and exit; talks to no platform")
 	flag.Parse()
 
-	// The read-only diagnostic an operator's hand-run was reaching for
-	// (tracker #15): safe without root, prints no credentials, and exits
+	// The read-only diagnostic for an operator's hand-run: safe without
+	// root, prints no credentials, and exits
 	// 0 = running, 1 = provisioned but not running, 78 = no identity here.
 	if showStatus {
 		os.Exit(runStatus(adoptionFile))

@@ -94,8 +94,8 @@ func shrinkRetries(t *testing.T, window time.Duration) {
 	})
 }
 
-// The whole point of the change: a transient failure must not take the process
-// down. This is the case that produced 701 systemd restarts in two hours.
+// A transient failure must not take the process down; otherwise systemd
+// restarts it in a loop for as long as the failure lasts.
 func TestConnectWithRetry_SucceedsAfterTransientFailures(t *testing.T) {
 	shrinkRetries(t, time.Minute)
 	pc := &fakePlatformClient{failuresBeforeOK: 3}

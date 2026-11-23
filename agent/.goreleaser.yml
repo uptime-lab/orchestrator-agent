@@ -167,8 +167,7 @@ nfpms:
     bindir: /usr/bin
     conflicts:
       - orchestrator-agent
-      # The pre-rename package (never deployed, but published to
-      # the CDN as 0.6.x): a machine that somehow carries it gets a clean
+      # The pre-rename package (published as 0.6.x): a machine that somehow carries it gets a clean
       # takeover instead of two units fighting over one identity.
       - orchestrator-observer
     replaces:

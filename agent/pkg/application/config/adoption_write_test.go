@@ -111,9 +111,8 @@ func TestTheOriginalIsBackedUpOnceAndNeverOverwritten(t *testing.T) {
 	}
 	// The backup holds the pre-handoff IDENTITY, not the pre-handoff file: the
 	// credential is redacted out of it. In master-token mode that credential is
-	// shared by every device the provisioning card ever touched, and the backup
-	// is never cleaned up — one was found on a device still matching an
-	// active, non-expiring master_tokens row.
+	// shared by every device the provisioning card ever touched and may never
+	// expire, and the backup is never cleaned up.
 	if string(saved) == string(original) {
 		t.Fatal("the backup was stored verbatim; the credential must be redacted out of it")
 	}

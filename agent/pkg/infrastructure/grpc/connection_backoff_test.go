@@ -11,8 +11,8 @@ import (
 // The protocol has no acks: stream.Send(ConnectionInit) returns as
 // soon as the frame is buffered locally, before the platform has looked at the
 // token. So "connected" at that instant is a guess, and resetting the backoff
-// on a guess is what let one rejected device retry ~50 times a minute forever
-// and take a third of the backend log with it.
+// on a guess lets a rejected agent retry at the base interval forever, which
+// floods the platform's log.
 
 func testController(t *testing.T) *ConnectionController {
 	t.Helper()

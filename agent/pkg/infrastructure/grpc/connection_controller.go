@@ -43,12 +43,11 @@ const (
 	// The agent cannot tell a good connection from a rejected one at the moment
 	// it opens: the protocol has no acks, so `stream.Send(ConnectionInit)`
 	// returns as soon as the frame is buffered locally — before the platform has
-	// looked at the token. Resetting the backoff there meant an agent whose
-	// credential the platform refuses retried at the BASE interval forever: dial,
-	// declare success, get closed, reset to attempt 0, dial again ~1s later. One
-	// device did that ~50 times a minute and owned a third of the
-	// backend log, which is the real damage — the log stops being usable as
-	// evidence for the next failure.
+	// looked at the token. Resetting the backoff there would make an agent whose
+	// credential the platform refuses retry at the BASE interval forever: dial,
+	// declare success, get closed, reset to attempt 0, dial again ~1s later. That
+	// floods the platform's log, which is the real damage — the log stops being
+	// usable as evidence for the next failure.
 	//
 	// 60s is chosen against the failure it must not break: a legitimate agent
 	// reconnecting after an outage holds its stream indefinitely, so it always

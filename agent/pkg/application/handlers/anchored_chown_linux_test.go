@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// The C-7 anchoring made the KERNEL OBJECT the identity of a file operation,
+// Descriptor anchoring made the KERNEL OBJECT the identity of a file operation,
 // but two ownership calls and one read kept re-walking the path STRING next to
 // it. On this product an unprivileged local user is a manufactured artefact —
 // a non-sudo access entry is exactly one — and such a user owning the parent

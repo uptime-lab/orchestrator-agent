@@ -36,3 +36,20 @@ func TestDeviceCapRefusalMessageMatchesThePlatform(t *testing.T) {
 		t.Fatalf("the platform's entitlement.GRPCRefusalMessage no longer equals %q", deviceCapRefusalMessage)
 	}
 }
+
+// The refusal at the device's account limit is held for like the device
+// cap, and its string is the platform's.
+func TestAccountLimitRefusalIsNotRetried(t *testing.T) {
+	c := &PlatformClient{}
+	err := status.Error(codes.ResourceExhausted, accountLimitRefusalMessage)
+	if c.isRecoverableError(err) || !isDeviceCapRefusal(err) {
+		t.Fatal("the account-limit refusal must be held for, not retried")
+	}
+	data, rerr := os.ReadFile("../../../../backend/pkg/webapp/domain/entitlement/account_limit.go")
+	if rerr != nil {
+		t.Skipf("platform source not beside this module (%v)", rerr)
+	}
+	if !strings.Contains(string(data), `GRPCAccountLimitMessage = "`+accountLimitRefusalMessage+`"`) {
+		t.Fatalf("the platform's entitlement.GRPCAccountLimitMessage no longer equals %q", accountLimitRefusalMessage)
+	}
+}

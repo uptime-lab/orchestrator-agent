@@ -214,9 +214,9 @@ func OpenWS2812(gpio int) (*WS2812, error) {
 }
 
 // wireColorWord packs a color for the blade's digital LEDs. The chips take
-// RED-GREEN-BLUE byte order, not the classic WS2812 GRB — measured live
-// (ambient green rendered red on two blades) and confirmed against the
-// owner's compute-blade-agent HAL, which serializes Red, Green, Blue. Blue
+// RED-GREEN-BLUE byte order, not the classic WS2812 GRB — measured (green
+// sent in GRB order renders red) and confirmed against the Compute Blade
+// project's compute-blade-agent HAL, which serializes Red, Green, Blue. Blue
 // and white look identical in both orders, which is why every earlier visual
 // validation missed it. If a future board carries GRB chips, the order
 // belongs in IdentifySpec, not here.

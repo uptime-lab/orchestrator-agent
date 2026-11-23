@@ -557,7 +557,7 @@ type ConnectionInit struct {
 	// code at all. The platform records it and refuses to dispatch
 	// commands to a watcher — belt (the binary cannot execute) and suspenders
 	// (the platform does not send). Old agents send nothing, which is "full".
-	// The retired value "observer" (0.6.x, pre-rename, never deployed) is
+	// The retired value "observer" (0.6.x, pre-rename) is
 	// normalized to "watcher" on receipt and must not be reused.
 	AgentKind string `protobuf:"bytes,3,opt,name=agent_kind,json=agentKind,proto3" json:"agent_kind,omitempty"`
 	// agent_instance_id identifies the agent PROCESS, not the node: a fresh
@@ -1163,9 +1163,9 @@ func (x *USBDevice) GetPort() string {
 // PowerInfo reports the SoC's power and thermal throttling state from
 // `vcgencmd get_throttled`. Under-voltage is the classic Raspberry Pi failure
 // mode, and it silently corrupts installs and captures rather than failing them
-// cleanly: a node powered from a computer's USB port browned out, its USB disk
-// stopped answering, and the platform showed a wipefs internal that pointed at
-// the disk while holding the deciding signal nowhere.
+// cleanly: a node powered from a computer's USB port can brown out and its USB
+// disk stop answering, which surfaces as a misleading disk error unless this
+// signal is reported beside it.
 //
 // The message is absent (not zero) on anything that cannot answer: no vcgencmd
 // must mean no facts rather than a claim that all is well.
@@ -2137,12 +2137,12 @@ func (*PlatformToNode_IdentityAssignment) isPlatformToNode_Payload() {}
 // Why this exists: without it, an agent in master-token mode sends that master
 // token on every single connect, forever, and the platform never tells it who
 // it is. The master token's whole purpose is to be short-lived and shared —
-// so its expiry became the expiry of every device adopted with it. When one
-// expired, the node went offline permanently and could not
-// be recovered remotely (the platform cannot command a node it cannot
-// authenticate); the fix was physical access to rewrite the adoption file.
-// Revoking a shared bootstrap token had the same effect on every node ever
-// adopted with it, which is the opposite of what revoking it is for.
+// so without this its expiry would be the expiry of every device adopted with
+// it: the node would go offline permanently and could not be recovered
+// remotely (the platform cannot command a node it cannot authenticate), only
+// by physical access to rewrite the adoption file. Revoking a shared bootstrap
+// token would have the same effect on every node ever adopted with it, which
+// is the opposite of what revoking it is for.
 //
 // The platform sends this once, immediately after a successful master-token
 // handshake. The agent persists it and uses node-specific mode from then on, so
@@ -3628,7 +3628,7 @@ func (x *InstallPackagesCommand) GetUpdate() bool {
 // (atomic write + daemon-reload) before the action runs.
 type ManageServiceCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                                  // Unit name, e.g. "teamcity-agent.service"
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                                  // Unit name, e.g. "myapp.service"
 	Action        string                 `protobuf:"bytes,2,opt,name=action,proto3" json:"action,omitempty"`                              // enable_now|start|restart|stop|disable_now|status
 	UnitContent   string                 `protobuf:"bytes,3,opt,name=unit_content,json=unitContent,proto3" json:"unit_content,omitempty"` // Optional full unit file content
 	unknownFields protoimpl.UnknownFields
@@ -4250,10 +4250,10 @@ type AccessUser struct {
 	AuthorizedKeys []string               `protobuf:"bytes,2,rep,name=authorized_keys,json=authorizedKeys,proto3" json:"authorized_keys,omitempty"` // full resolved public-key lines
 	Sudo           bool                   `protobuf:"varint,3,opt,name=sudo,proto3" json:"sudo,omitempty"`
 	PasswordAction PasswordAction         `protobuf:"varint,4,opt,name=password_action,json=passwordAction,proto3,enum=orchestrator.PasswordAction" json:"password_action,omitempty"`
-	// RETIRED: the cleartext password. Never populated since the platform started
-	// sending password_hash (agent floor 0.5.0) — an unprivileged shell on ONE
-	// node could read its adoption token, open a stream as that node, and receive
-	// the account's cleartext passwords for EVERY node in it. The field number
+	// RETIRED: the cleartext password. Never populated; the platform sends
+	// password_hash instead (agent floor 0.5.0), because a cleartext field would
+	// let an unprivileged shell on ONE node read its adoption token, open a
+	// stream as that node, and receive the account's passwords for EVERY node. The field number
 	// stays reserved-in-place rather than removed: an agent older than the floor
 	// still decodes it, and reusing 5 for anything else would hand such an agent
 	// a garbage password.
@@ -4952,8 +4952,8 @@ func (x *PatchFileCommand) GetMarker() string {
 // reaches past the platform. The row goes and the device is told nothing: its
 // adoption file still names a node_id that no longer exists, so ConnectionInit is
 // refused, and a network-first device cannot even reach recovery because
-// HTTP-boot withholds an unknown serial. One was found powered and on the network
-// three days after its node was deleted, invisible to the platform.
+// HTTP-boot withholds an unknown serial. Such a device stays powered and on the
+// network, invisible to the platform.
 //
 // The agent reports success and then keeps running on its existing stream — it
 // does NOT tear the connection down, because the platform is about to delete the
@@ -5243,9 +5243,9 @@ type InstallOSCommand struct {
 	TargetDevice string                 `protobuf:"bytes,4,opt,name=target_device,json=targetDevice,proto3" json:"target_device,omitempty"` // Device path (e.g., "/dev/sda")
 	Reboot       bool                   `protobuf:"varint,5,opt,name=reboot,proto3" json:"reboot,omitempty"`                                // Whether to reboot after installation
 	// RETIRED, all three: the agent ignores them — nothing in handleInstallOS
-	// reads them — and the platform no longer populates them. They were pure leak: an impostor holding one node's adoption
-	// token received the account's provisioning credentials for no functional
-	// reason at all. Reserved in place, never to be reused.
+	// reads them — and the platform does not populate them: they would hand an
+	// impostor holding one node's adoption token the account's provisioning
+	// credentials for no functional reason. Reserved in place, never to be reused.
 	Username string `protobuf:"bytes,6,opt,name=username,proto3" json:"username,omitempty"`
 	Password string `protobuf:"bytes,7,opt,name=password,proto3" json:"password,omitempty"`
 	SshKey   string `protobuf:"bytes,8,opt,name=ssh_key,json=sshKey,proto3" json:"ssh_key,omitempty"`
@@ -5374,11 +5374,10 @@ func (x *InstallOSCommand) GetStripIdentity() bool {
 
 // InstallAgentOnVolumeCommand installs the orchestrator agent onto a newly installed OS volume.
 //
-// **The CALLER owns this sequence.** This comment claimed the backend triggers it
-// automatically after a successful InstallOSCommand; it does not, and nothing in
-// the services ever has: a harness that dispatched only install_os produced a
-// node whose freshly installed disk contained no agent unit and no agent binary,
-// and therefore could never call home. The UI does
+// **The CALLER owns this sequence.** The backend does not trigger it after a
+// successful InstallOSCommand: a caller that dispatches only install_os leaves a
+// freshly installed disk with no agent unit and no agent binary, which can never
+// call home. The UI does
 // install_os → install_agent → reboot, and anything else driving an install must
 // do the same. Note install_os's own `reboot` flag must be FALSE for that, or the
 // device restarts into an OS with no agent in it.
@@ -5696,10 +5695,9 @@ type ProvisionConnectionCommand struct {
 	SshKeyType    string            `protobuf:"bytes,6,opt,name=ssh_key_type,json=sshKeyType,proto3" json:"ssh_key_type,omitempty"`                                         // Key type: "ssh" (authorized_keys) or "ca" (certificate authority)
 	Env           map[string]string `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Environment secrets (name -> value) to write into the target OS (optional)
 	// crypt(3) SHA-512 (`$6$`) hash of the password, applied with `chpasswd -e`.
-	// The second of the two cleartext-password senders the access-config fix
-	// closed: the provisioning password is usually an OU or account DEFAULT, so
-	// it is shared across the fleet and leaking it from one device leaks it for
-	// all of them.
+	// Never cleartext: the provisioning password is usually an OU or account
+	// DEFAULT, so it is shared across the fleet and leaking it from one device
+	// leaks it for all of them.
 	PasswordHash  string `protobuf:"bytes,8,opt,name=password_hash,json=passwordHash,proto3" json:"password_hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

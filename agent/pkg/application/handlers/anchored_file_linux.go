@@ -416,8 +416,8 @@ func (t *anchoredTarget) Chmod(mode os.FileMode) error {
 // O_RDWR, not O_WRONLY: download_file writes, hashes and then EXTRACTS from
 // this one descriptor, rewound — the same-descriptor rule is what makes the
 // checksum cover the bytes that are unpacked. A write-only descriptor seeks
-// fine and then fails its first read with EBADF, which broke every
-// extract=true download after the anchor landed (shipped in agent 0.7.4).
+// fine and then fails its first read with EBADF, which breaks every
+// extract=true download.
 // AtomicWrite only writes and is indifferent to the mode.
 func (t *anchoredTarget) createTemp() (string, int, error) {
 	for attempt := 0; attempt < 10; attempt++ {

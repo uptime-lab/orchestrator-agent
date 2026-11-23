@@ -547,7 +547,7 @@ func (h *CommandHandler) handleWriteFile(commandID string, cmd *proto.WriteFileC
 	}
 	defer target.Close()
 
-	// A7: refuse a non-regular target. The write renames a fresh inode into
+	// Refuse a non-regular target. The write renames a fresh inode into
 	// place, so writing /etc/resolv.conf (a symlink into /run) would silently
 	// replace the link with a static file and break DNS at the next resolved
 	// restart. The read path already refuses symlinks; this makes the two agree.
