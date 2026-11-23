@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"agent/pkg/domain/board"
+	"agent/pkg/domain/refusal"
 	"agent/pkg/pkgver"
 	"agent/pkg/signing"
 
@@ -245,7 +246,12 @@ func (h *CommandHandler) validateTargetDevice(devicePath string, allowPartitione
 
 // downloadAndWriteImageChunked downloads image in chunks and writes to device using dd
 // Progress is reported from 5% to 95% (90% range for download, 5% reserved for resize)
-func (h *CommandHandler) downloadAndWriteImageChunked(commandID, imageURL, targetDevice, expectedChecksum string) (err error) {
+//
+// With wipe, the old partition and filesystem signatures are cleared too, so a
+// stale table or filesystem beyond the written image cannot confuse blkid or
+// the bootloader. Both that and the disarm run only once the image stream has
+// delivered its first bytes (prepareOnFirstRead).
+func (h *CommandHandler) downloadAndWriteImageChunked(commandID, imageURL, targetDevice, expectedChecksum string, wipe bool) (err error) {
 	h.logger.Info("starting image download and write", "image_url", redactURL(imageURL), "target_device", targetDevice)
 
 	// A stall watchdog rather than an overall deadline: progress is sampled from
@@ -336,10 +342,22 @@ func (h *CommandHandler) downloadAndWriteImageChunked(commandID, imageURL, targe
 	defer deviceFile.Close()
 
 	// The previous install stops being bootable before anything of this one is
-	// written, and durably — a reset mid-stream never reaches a defer.
-	if err := disarmTargetBeforeWrite(deviceFile); err != nil {
-		return fmt.Errorf("failed to prepare %s: %w", targetDevice, err)
-	}
+	// written, and durably — a reset mid-stream never reaches a defer. Not
+	// before the stream has started, though: until then nothing obliges the
+	// disk to lose the system it holds.
+	stream := newPrepareOnFirstRead(imageReader, func() error {
+		if wipe {
+			h.reportCommandStatus(commandID, "in_progress", 5, "Wiping existing disk signatures")
+			if out, werr := exec.Command("wipefs", "-a", targetDevice).CombinedOutput(); werr != nil {
+				h.logger.Warn("wipefs reported an issue (continuing; the image write overwrites the table)",
+					"device", targetDevice, "error", werr, "output", strings.TrimSpace(string(out)))
+			}
+		}
+		if err := disarmTargetBeforeWrite(deviceFile); err != nil {
+			return fmt.Errorf("failed to prepare %s: %w", targetDevice, err)
+		}
+		return nil
+	})
 
 	// Sync every 256MB to keep memory pressure bounded on the netboot
 	// bootstrap while letting the kernel batch writes efficiently.
@@ -369,7 +387,9 @@ func (h *CommandHandler) downloadAndWriteImageChunked(commandID, imageURL, targe
 	// failure (a resize, a partprobe) must not destroy a good install.
 	committed := false
 	defer func() {
-		if err == nil || committed {
+		// Untouched — the stream failed before its first bytes — means the
+		// previous system is intact, and there is nothing to invalidate.
+		if err == nil || committed || !stream.Prepared() {
 			return
 		}
 		h.invalidateTargetDevice(deviceFile, targetDevice, writtenBytes)
@@ -401,7 +421,7 @@ func (h *CommandHandler) downloadAndWriteImageChunked(commandID, imageURL, targe
 	// Chunked loop - write sequentially to device
 	for {
 		// Read chunk of raw image bytes (decompressed if the source is .xz)
-		n, err := imageReader.Read(buffer)
+		n, err := stream.Read(buffer)
 
 		// Process data if we read any bytes
 		if n > 0 {
@@ -2153,7 +2173,7 @@ func (h *CommandHandler) handleInstallOS(commandID string, cmd *proto.InstallOSC
 	// flow for a board with no NVMe, and the bootstrap keeps that card mounted
 	// for its adoption file — which the validation below would then refuse as a
 	// mounted device. No-op on an installed OS.
-	released, lazilyDetached, rerr := h.releaseBootMediaMounts(cmd.TargetDevice)
+	released, lazilyDetached, restoreMounts, rerr := h.releaseBootMediaMounts(cmd.TargetDevice)
 	if rerr != nil {
 		h.logger.Warn("could not fully release the target device before install",
 			"command_id", commandID, "target_device", cmd.TargetDevice, "error", rerr)
@@ -2164,6 +2184,8 @@ func (h *CommandHandler) handleInstallOS(commandID string, cmd *proto.InstallOSC
 
 	// Initial validation
 	if err := h.validateTargetDevice(cmd.TargetDevice, cmd.Wipe); err != nil {
+		// Refused with nothing written: put the card's mount back.
+		restoreMounts()
 		err = explainBusyAfterLazyUnmount(err, lazilyDetached)
 		errMsg := fmt.Sprintf("device validation failed: %v", err)
 		h.logger.Error("device validation failed", "command_id", commandID, "target_device", cmd.TargetDevice, "error", err)
@@ -2172,17 +2194,6 @@ func (h *CommandHandler) handleInstallOS(commandID string, cmd *proto.InstallOSC
 		// Report failure status to backend
 		h.sendStatusUpdate("os_installation_failed", errMsg)
 		return fmt.Errorf("device validation failed: %w", err)
-	}
-
-	// Restore / re-image: clear old partition + filesystem signatures so a
-	// stale table or fs beyond the written image cannot confuse blkid or the
-	// bootloader. The image write replaces the MBR anyway; this is belt-and-suspenders.
-	if cmd.Wipe {
-		h.reportCommandStatus(commandID, "in_progress", 3, "Wiping existing disk signatures")
-		if out, werr := exec.Command("wipefs", "-a", cmd.TargetDevice).CombinedOutput(); werr != nil {
-			h.logger.Warn("wipefs reported an issue (continuing; the image write overwrites the table)",
-				"device", cmd.TargetDevice, "error", werr, "output", strings.TrimSpace(string(out)))
-		}
 	}
 
 	// Report 5% - validation complete, starting download
@@ -2195,7 +2206,7 @@ func (h *CommandHandler) handleInstallOS(commandID string, cmd *proto.InstallOSC
 	const maxDownloadAttempts = 3
 	var err error
 	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
-		err = h.downloadAndWriteImageChunked(commandID, cmd.ImageUrl, cmd.TargetDevice, cmd.Checksum)
+		err = h.downloadAndWriteImageChunked(commandID, cmd.ImageUrl, cmd.TargetDevice, cmd.Checksum, cmd.Wipe)
 		if err == nil {
 			break
 		}
@@ -4017,7 +4028,8 @@ func (h *CommandHandler) handleEraseDrive(commandID string, cmd *proto.EraseDriv
 	// by the bootstrap itself. Without this the erase fails with "probing
 	// initialization failed: Device or resource busy" and names nothing that
 	// would let an operator work out why. No-op on an installed OS.
-	if released, _, rerr := h.releaseBootMediaMounts(cmd.TargetDevice); rerr != nil {
+	released, _, restoreMounts, rerr := h.releaseBootMediaMounts(cmd.TargetDevice)
+	if rerr != nil {
 		h.logger.Warn("could not fully release the target device before erase",
 			"command_id", commandID, "target_device", cmd.TargetDevice, "error", rerr)
 	} else if len(released) > 0 {
@@ -4030,6 +4042,8 @@ func (h *CommandHandler) handleEraseDrive(commandID string, cmd *proto.EraseDriv
 	// mistaken for a dead one: the probe opens read-only and shared, but keeping
 	// the order means the two failures cannot be confused in the report either.
 	if err := h.checkDeviceResponds(cmd.TargetDevice); err != nil {
+		// Refused with nothing erased: put the card's mount back.
+		restoreMounts()
 		h.logger.Error("target device is not responding", "command_id", commandID,
 			"target_device", cmd.TargetDevice, "error", err)
 		h.reportCommandStatus(commandID, "failed", 40, err.Error())
@@ -4084,7 +4098,7 @@ func (h *CommandHandler) handleSetHostname(commandID string, cmd *proto.SetHostn
 
 	if errMsg := setHostnameRejection(name); errMsg != "" {
 		h.reportCommandStatus(commandID, "failed", 0, errMsg)
-		return fmt.Errorf("%s", errMsg)
+		return refusal.Wrap(fmt.Errorf("%s", errMsg))
 	}
 
 	if _, err := exec.LookPath("hostnamectl"); err == nil {
@@ -4125,18 +4139,7 @@ func (h *CommandHandler) syncEtcHostsHostname(name string) {
 	if err != nil {
 		return
 	}
-	lines := strings.Split(string(data), "\n")
-	found := false
-	for i, ln := range lines {
-		if fields := strings.Fields(ln); len(fields) >= 1 && fields[0] == "127.0.1.1" {
-			lines[i] = "127.0.1.1\t" + name
-			found = true
-		}
-	}
-	if !found {
-		lines = append(lines, "127.0.1.1\t"+name)
-	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(etcHostsWithHostname(string(data), name)), 0o644); err != nil {
 		h.logger.Warn("failed to update /etc/hosts", "error", err)
 	}
 }

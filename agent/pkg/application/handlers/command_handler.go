@@ -9,6 +9,7 @@ import (
 
 	ports "agent/pkg/application/ports/out"
 	"agent/pkg/domain/node"
+	"agent/pkg/domain/refusal"
 	proto "agent/pkg/infrastructure/grpc/proto"
 	"agent/pkg/infrastructure/hardware"
 )
@@ -241,6 +242,6 @@ func (h *CommandHandler) HandleCommand(command *proto.Command) (err error) {
 		// newer platform sends a command type this (older) agent can't decode.
 		errMsg := "unknown or unsupported command type"
 		h.reportCommandStatus(command.CommandId, "failed", 0, errMsg)
-		return fmt.Errorf("%s", errMsg)
+		return refusal.Wrap(fmt.Errorf("%s", errMsg))
 	}
 }

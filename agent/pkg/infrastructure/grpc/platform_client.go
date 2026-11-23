@@ -14,6 +14,7 @@ import (
 
 	"agent/pkg/domain/node"
 	"agent/pkg/domain/redact"
+	"agent/pkg/domain/refusal"
 	proto "agent/pkg/infrastructure/grpc/proto"
 
 	"github.com/google/uuid"
@@ -946,12 +947,7 @@ func (c *PlatformClient) ListenForCommands(ctx context.Context, commandHandler f
 						c.logger.Info("command received", "command_id", command.CommandId)
 						c.guarded("command", command.CommandId, func() {
 							if err := commandHandler(command); err != nil {
-								// The logging boundary redacts too: a handler
-								// that returns a raw *url.Error (an
-								// operator-authored URL with a credential in
-								// it) must not depend on every call site
-								// remembering to.
-								c.logger.Error("command handler failed", "command_id", command.CommandId, "error", redact.Error(err))
+								c.logCommandHandlerError(command.CommandId, err)
 							}
 						})
 					} else if isTerminalFrame(result.msg) {
@@ -966,6 +962,22 @@ func (c *PlatformClient) ListenForCommands(ctx context.Context, commandHandler f
 			}
 		}
 	}
+}
+
+// logCommandHandlerError logs the error a command handler returned: at WARN
+// when the handler refused the command (its input, its type or a policy
+// turned it away, and the refusal was reported), at ERROR when the command ran
+// and failed.
+//
+// The logging boundary redacts too: a handler that returns a raw *url.Error
+// (an operator-authored URL with a credential in it) must not depend on every
+// call site remembering to.
+func (c *PlatformClient) logCommandHandlerError(commandID string, err error) {
+	if refusal.Is(err) {
+		c.logger.Warn("command refused", "command_id", commandID, "error", redact.Error(err))
+		return
+	}
+	c.logger.Error("command handler failed", "command_id", commandID, "error", redact.Error(err))
 }
 
 // guarded runs one inbound-frame handler and contains a panic in it.

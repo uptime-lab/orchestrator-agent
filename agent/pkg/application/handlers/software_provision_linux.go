@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"agent/pkg/domain/redact"
+	"agent/pkg/domain/refusal"
 	proto "agent/pkg/infrastructure/grpc/proto"
 )
 
@@ -160,7 +161,7 @@ func (h *CommandHandler) handleManageService(commandID string, cmd *proto.Manage
 	name := strings.TrimSpace(cmd.Name)
 	if name == "" {
 		h.reportCommandResult(commandID, "failed", "unit name is required", nil)
-		return fmt.Errorf("unit name is required")
+		return refusal.Wrap(fmt.Errorf("unit name is required"))
 	}
 	if !strings.Contains(name, ".") {
 		name += ".service"
@@ -170,7 +171,7 @@ func (h *CommandHandler) handleManageService(commandID string, cmd *proto.Manage
 	// systemctl arg.
 	if !unitNameRe.MatchString(name) {
 		h.reportCommandResult(commandID, "failed", "invalid unit name", nil)
-		return fmt.Errorf("invalid unit name %q", name)
+		return refusal.Wrap(fmt.Errorf("invalid unit name %q", name))
 	}
 
 	// The agent's own units are refused, whatever the action.
@@ -188,7 +189,7 @@ func (h *CommandHandler) handleManageService(commandID string, cmd *proto.Manage
 	if platformManagedUnit(name) {
 		msg := name + " is managed by the platform; use the agent update and Watcher controls instead"
 		h.reportCommandResult(commandID, "failed", msg, nil)
-		return fmt.Errorf("%s", msg)
+		return refusal.Wrap(fmt.Errorf("%s", msg))
 	}
 
 	// The action is validated before anything is written: an unknown action
@@ -196,7 +197,7 @@ func (h *CommandHandler) handleManageService(commandID string, cmd *proto.Manage
 	scArgs, err := serviceActionArgs(cmd.Action, name)
 	if err != nil {
 		h.reportCommandResult(commandID, "failed", "unknown action: "+cmd.Action, nil)
-		return err
+		return refusal.Wrap(err)
 	}
 
 	if strings.TrimSpace(cmd.UnitContent) != "" {
@@ -607,9 +608,49 @@ func (h *CommandHandler) handleWriteFile(commandID string, cmd *proto.WriteFileC
 	if m := parseMode(cmd.Mode); m != 0 {
 		mode = m
 	}
+	validator := writeValidatorFor(path)
+	if validator == writeValidatorSudoers {
+		if err := checkSudoersCandidate([]byte(cmd.Content)); err != nil {
+			err = refusal.Wrap(err)
+			h.reportCommandResult(commandID, "failed", err.Error(), nil)
+			return err
+		}
+	}
+	// What sshd's check restores on a rejection: the previous content, or no
+	// file at all. Read through the anchor before the write replaces it.
+	var previous []byte
+	if validator == writeValidatorSSHD && statErr == nil {
+		data, rerr := target.ReadBounded(8 * 1024 * 1024)
+		if rerr != nil {
+			h.reportCommandResult(commandID, "failed", "read before write failed: "+rerr.Error(), nil)
+			return rerr
+		}
+		previous = data
+	}
 	if err := target.AtomicWrite([]byte(cmd.Content), mode); err != nil {
 		h.reportCommandResult(commandID, "failed", "write failed: "+err.Error(), nil)
 		return err
+	}
+	if validator == writeValidatorSSHD {
+		if verr := h.validateSSHDConfig("/"); verr != nil && !errors.Is(verr, exec.ErrNotFound) {
+			var rerr error
+			if statErr == nil {
+				rerr = target.AtomicWrite(previous, existing.Mode().Perm())
+				if st, ok := existing.Sys().(*syscall.Stat_t); ok && rerr == nil {
+					_ = target.Chown(int(st.Uid), int(st.Gid))
+				}
+			} else {
+				rerr = target.Unlink()
+			}
+			msg := "sshd rejected the configuration, the previous file was restored: " + verr.Error()
+			if rerr != nil {
+				msg = "sshd rejected the configuration and restoring the previous file failed (" +
+					rerr.Error() + "): " + verr.Error()
+			}
+			err := refusal.Wrap(errors.New(msg))
+			h.reportCommandResult(commandID, "failed", msg, nil)
+			return err
+		}
 	}
 	// No chmod here: AtomicWrite already applied `mode`, which already carries
 	// cmd.Mode. A path-based one would also be a re-walk of the string the

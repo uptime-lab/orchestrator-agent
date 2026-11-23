@@ -85,3 +85,19 @@ func TestMountsForDeviceIgnoresEmptyDevicePath(t *testing.T) {
 		t.Fatalf("an empty device path must match nothing, got %v", mountPoints(got))
 	}
 }
+
+// A command that released the provisioning card's mount and was then refused
+// mounts it back exactly as it was: the identity release writes the adoption
+// file through that mount, and with the mount gone the write lands in the RAM
+// directory beneath it while the card keeps the old identity.
+func TestReleasedMountIsRestoredAsItWas(t *testing.T) {
+	mounts := mountsForDevice(strings.NewReader(procMountsSample), "/dev/mmcblk0")
+	if len(mounts) != 1 {
+		t.Fatalf("want one mount, got %v", mounts)
+	}
+	got := strings.Join(remountArgs(mounts[0]), " ")
+	want := "-t vfat -o rw,sync,relatime /dev/mmcblk0p1 /mnt/sdcard"
+	if got != want {
+		t.Fatalf("remount args = %q, want %q", got, want)
+	}
+}

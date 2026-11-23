@@ -110,7 +110,9 @@ func (e *packageLockTimeoutError) Unwrap() error { return e.last }
 
 // describeLockHolder names a process from its /proc/<pid>/cmdline: the script
 // when the program is an interpreter (unattended-upgrade runs as python3), the
-// program otherwise.
+// module for `python3 -m`, the program otherwise. Code given inline (`-c`) is
+// not a name: the holder is then the interpreter, and no part of the code is
+// reported.
 func describeLockHolder(pid int, cmdline []byte) string {
 	if pid <= 0 {
 		return "another process"
@@ -120,18 +122,45 @@ func describeLockHolder(pid int, cmdline []byte) string {
 	if len(args) > 0 && args[0] != "" {
 		name = filepath.Base(args[0])
 		if isInterpreter(name) {
-			for _, a := range args[1:] {
-				if a != "" && !strings.HasPrefix(a, "-") {
-					name = filepath.Base(a)
-					break
-				}
-			}
+			name = interpreterScriptName(name, args[1:])
 		}
 	}
 	if name == "" {
 		return "process " + strconv.Itoa(pid)
 	}
 	return fmt.Sprintf("%s (pid %d)", name, pid)
+}
+
+// interpreterScriptName returns what an interpreter invocation runs: the base
+// name of its script, the module after `-m`, or the interpreter itself when
+// the code comes inline from a `-c` option (alone or in a bundle such as
+// `-ec`) or there is no script at all.
+func interpreterScriptName(interpreter string, args []string) string {
+	for i, a := range args {
+		if a == "" {
+			continue
+		}
+		if a == "--" {
+			if i+1 < len(args) && args[i+1] != "" {
+				return filepath.Base(args[i+1])
+			}
+			return interpreter
+		}
+		if strings.HasPrefix(a, "-") {
+			if !strings.HasPrefix(a, "--") && strings.Contains(a[1:], "c") {
+				return interpreter
+			}
+			if a == "-m" {
+				if i+1 < len(args) && args[i+1] != "" {
+					return filepath.Base(args[i+1])
+				}
+				return interpreter
+			}
+			continue
+		}
+		return filepath.Base(a)
+	}
+	return interpreter
 }
 
 func isInterpreter(name string) bool {

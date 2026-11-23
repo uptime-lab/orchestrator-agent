@@ -314,8 +314,11 @@ func (h *CommandHandler) reconcileAccess(rootPath string, spec accessConfigSpec,
 	// rather than "before the sshd rewrite" — the sshd write is last, but user
 	// creation and key installation are not, and a refusal should leave no
 	// half-made users behind either.
-	preview, previewSkipped, err := h.classifyUsers(rootPath, spec)
+	preview, previewSkipped, previewAdopting, err := h.classifyUsers(rootPath, spec)
 	if err != nil {
+		return report, err
+	}
+	if err := adoptionLockRefusal(spec, previewAdopting); err != nil {
 		return report, err
 	}
 	if len(previewSkipped) > 0 {
@@ -1207,7 +1210,8 @@ func writeFileAtomicNoRename(path string, content []byte, perm os.FileMode) erro
 }
 
 // classifyUsers reports which of the desired users this command will be able to
-// manage on this host, and which it will skip as unmanaged. It only INSPECTS —
+// manage on this host, which it will skip as unmanaged, and which of the
+// manageable ones it adopts from outside the managed group. It only INSPECTS —
 // no user is created, adopted or modified — so its caller can refuse a
 // configuration before anything on the device has changed.
 //
@@ -1215,12 +1219,12 @@ func writeFileAtomicNoRename(path string, content []byte, perm os.FileMode) erro
 // (manageable), a user already in the managed group is ours, a user outside it
 // is manageable only with an explicit adopt request. Keep the two in step; the
 // gate is worth nothing if it predicts a different outcome than the reconcile.
-func (h *CommandHandler) classifyUsers(rootPath string, spec accessConfigSpec) (manageable []accessUserSpec, skipped []string, err error) {
+func (h *CommandHandler) classifyUsers(rootPath string, spec accessConfigSpec) (manageable []accessUserSpec, skipped, adopting []string, err error) {
 	manageable = make([]accessUserSpec, 0, len(spec.Users))
 	for _, u := range spec.Users {
 		exists, eerr := h.userExists(rootPath, u.Username)
 		if eerr != nil {
-			return nil, nil, fmt.Errorf("failed to check user %s: %w", u.Username, eerr)
+			return nil, nil, nil, fmt.Errorf("failed to check user %s: %w", u.Username, eerr)
 		}
 		if !exists {
 			manageable = append(manageable, u)
@@ -1228,13 +1232,16 @@ func (h *CommandHandler) classifyUsers(rootPath string, spec accessConfigSpec) (
 		}
 		ours, gerr := h.userInManagedGroup(rootPath, u.Username)
 		if gerr != nil {
-			return nil, nil, fmt.Errorf("failed to check group membership for %s: %w", u.Username, gerr)
+			return nil, nil, nil, fmt.Errorf("failed to check group membership for %s: %w", u.Username, gerr)
 		}
 		if !ours && !u.AdoptUnmanaged {
 			skipped = append(skipped, u.Username)
 			continue
 		}
+		if !ours {
+			adopting = append(adopting, u.Username)
+		}
 		manageable = append(manageable, u)
 	}
-	return manageable, skipped, nil
+	return manageable, skipped, adopting, nil
 }

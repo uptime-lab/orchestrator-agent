@@ -10,6 +10,8 @@ import (
 type deviceMount struct {
 	Source     string
 	MountPoint string
+	FSType     string
+	Options    string
 }
 
 // mountsForDevice returns the mounts of devicePath and of its partitions,
@@ -43,7 +45,11 @@ func mountsForDevice(procMounts io.Reader, devicePath string) []deviceMount {
 		if !isDeviceOrPartition(source, devicePath) {
 			continue
 		}
-		found = append(found, deviceMount{Source: source, MountPoint: mountPoint})
+		m := deviceMount{Source: source, MountPoint: mountPoint}
+		if len(fields) >= 4 {
+			m.FSType, m.Options = fields[2], fields[3]
+		}
+		found = append(found, m)
 	}
 	return found
 }
@@ -107,4 +113,16 @@ func unescapeMountField(field string) string {
 		i += 3
 	}
 	return b.String()
+}
+
+// remountArgs are mount(8)'s arguments for putting m back as it was.
+func remountArgs(m deviceMount) []string {
+	var args []string
+	if m.FSType != "" {
+		args = append(args, "-t", m.FSType)
+	}
+	if m.Options != "" {
+		args = append(args, "-o", m.Options)
+	}
+	return append(args, m.Source, m.MountPoint)
 }

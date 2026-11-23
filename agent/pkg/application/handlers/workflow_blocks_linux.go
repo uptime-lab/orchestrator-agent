@@ -202,10 +202,10 @@ func (h *CommandHandler) handleRunScript(commandID string, cmd *proto.RunScriptC
 	command.Stdout = stdout
 	command.Stderr = stderr
 	// Because Stdout/Stderr are not *os.File, exec gives the child OS pipes and
-	// Run waits for them to reach EOF. CommandContext kills only the direct
-	// child, so a script that forks a daemon — `something &`, anything that
-	// daemonises — leaves a grandchild holding the write end, and Run blocks
-	// past the timeout forever. This runs on the agent's single command
+	// Run waits for them to reach EOF. A cancel kills the script's process
+	// group (newScriptCommand), but a script that ends normally after forking
+	// a daemon — `something &`, anything that daemonises or leaves the group —
+	// leaves a process holding the write end, and Run would block forever. This runs on the agent's single command
 	// goroutine, so that one script wedges every later command on the node.
 	// WaitDelay stops waiting for the pipes shortly after the context ends;
 	// output produced up to that point is still reported.

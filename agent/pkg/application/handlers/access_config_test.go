@@ -420,3 +420,41 @@ func TestMissingPrivsepDir(t *testing.T) {
 		})
 	}
 }
+
+// Adopting an existing account that the entry gives no key and no password
+// takes the account over AND locks it in one apply: its password is cleared,
+// it is expired, and its sessions are ended — the operator's own login
+// included. Nothing in the desired config looks like a lockout, because an
+// account the platform does not manage is assumed to keep working; that
+// assumption is false for the account the same apply adopts.
+func TestAdoptingAnAccountWithNoCredentialIsRefused(t *testing.T) {
+	spec := accessConfigSpec{
+		Users: []accessUserSpec{{
+			Username:       "ubuntu",
+			AdoptUnmanaged: true,
+			Sudo:           true,
+			PasswordAction: "clear",
+		}},
+	}
+	if wouldLockOutAllAccess(spec) {
+		t.Fatal("the whole-node gate fires on its own; this test no longer pins the adoption case")
+	}
+	err := adoptionLockRefusal(spec, []string{"ubuntu"})
+	if err == nil {
+		t.Fatal("adopting an account with no key and no password was accepted")
+	}
+	if !strings.Contains(err.Error(), "ubuntu") {
+		t.Errorf("the refusal does not name the account: %v", err)
+	}
+
+	// The same entry with a key adopts and keeps a way in.
+	spec.Users[0].AuthorizedKeys = []string{"ssh-ed25519 AAAA ops"}
+	if err := adoptionLockRefusal(spec, []string{"ubuntu"}); err != nil {
+		t.Fatalf("an adoption that keeps a key was refused: %v", err)
+	}
+	// A managed user losing its last key is the documented lock, not this case.
+	spec.Users[0].AuthorizedKeys = nil
+	if err := adoptionLockRefusal(spec, nil); err != nil {
+		t.Fatalf("locking an already-managed user was refused: %v", err)
+	}
+}

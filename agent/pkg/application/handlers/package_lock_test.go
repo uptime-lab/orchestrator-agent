@@ -174,6 +174,13 @@ func TestDescribeLockHolder(t *testing.T) {
 		{42, "/usr/bin/python3.14\x00-u\x00/usr/bin/unattended-upgrade\x00", "unattended-upgrade (pid 42)"},
 		{7, "/usr/bin/apt-get\x00install\x00-y\x00", "apt-get (pid 7)"},
 		{7, "dpkg\x00--configure\x00-a\x00", "dpkg (pid 7)"},
+		// Inline code is not a script name: the interpreter names the holder,
+		// and nothing of the code reaches the report.
+		{9, "python3\x00-c\x00import fcntl, time; f = open('/var/lib/dpkg/lock-frontend', 'w')\x00", "python3 (pid 9)"},
+		{9, "/usr/bin/python3\x00-Bc\x00import time; time.sleep(60)\x00", "python3 (pid 9)"},
+		{9, "/bin/sh\x00-c\x00apt-get install -y curl\x00", "sh (pid 9)"},
+		{9, "/bin/bash\x00-ec\x00apt-get update\x00", "bash (pid 9)"},
+		{9, "python3\x00-m\x00unattended_upgrade\x00", "unattended_upgrade (pid 9)"},
 		{5, "", "process 5"},
 		{0, "", "another process"},
 		{-1, "x", "another process"},

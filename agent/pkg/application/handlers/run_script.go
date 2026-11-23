@@ -2,10 +2,14 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+
+	"agent/pkg/domain/refusal"
 )
 
 // runScriptParentDirs are where a run_script body is staged, in order of
@@ -28,12 +32,26 @@ var runScriptParentDirs = []string{"/run", ""}
 //
 // The returned cleanup removes the directory and must run after the command
 // has finished, because the shell reads its script incrementally.
+//
+// The shell leads its own process group, and cancelling ctx kills the group.
+//
+// A body containing a NUL byte is refused before anything is staged: no shell
+// script can contain one, and the shells disagree about what they do with it
+// (stop reading, or drop it), so the device would run something other than
+// what was sent.
 func newScriptCommand(ctx context.Context, script string) (*exec.Cmd, func(), error) {
+	if strings.ContainsRune(script, 0) {
+		return nil, func() {}, refusal.Wrap(errors.New("the script contains a NUL byte; a shell script cannot carry one"))
+	}
 	path, cleanup, err := stageScriptBody(script)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	return exec.CommandContext(ctx, "/bin/sh", path), cleanup, nil
+	cmd := exec.CommandContext(ctx, "/bin/sh", path)
+	// A timeout or cancel ends everything the script started, not only the
+	// shell.
+	inOwnProcessGroup(cmd)
+	return cmd, cleanup, nil
 }
 
 // stageScriptBody writes script into a private directory and returns the

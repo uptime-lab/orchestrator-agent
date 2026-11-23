@@ -30,21 +30,43 @@ import (
 // still to refuse; nothing about this path should make it easier to erase a
 // disk out from under a running system.
 //
-// Returns the mount points released, for the caller to report, and the subset
-// that could only be detached lazily.
-func (h *CommandHandler) releaseBootMediaMounts(devicePath string) (released, lazy []string, err error) {
+// Returns the mount points released, for the caller to report, the subset
+// that could only be detached lazily, and restore, which mounts what was
+// released back as it was. A caller whose command is then refused before
+// anything is written calls restore: the bootstrap reads and writes the
+// adoption file through the card's mount, and with the mount gone an identity
+// release would remove nothing from the card while reporting success.
+func (h *CommandHandler) releaseBootMediaMounts(devicePath string) (released, lazy []string, restore func(), err error) {
+	restore = func() {}
 	if !hardware.RootIsEphemeral() {
-		return nil, nil, nil
+		return nil, nil, restore, nil
 	}
 
 	f, err := os.Open("/proc/mounts")
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read /proc/mounts: %w", err)
+		return nil, nil, restore, fmt.Errorf("cannot read /proc/mounts: %w", err)
 	}
 	mounts := mountsForDevice(f, devicePath)
 	_ = f.Close()
 	if len(mounts) == 0 {
-		return nil, nil, nil
+		return nil, nil, restore, nil
+	}
+
+	var detached []deviceMount
+	restore = func() {
+		for _, m := range detached {
+			if isMountPoint(m.MountPoint) {
+				continue
+			}
+			if out, merr := exec.Command("mount", remountArgs(m)...).CombinedOutput(); merr != nil {
+				h.logger.Warn("could not restore a recovery-bootstrap mount after a refused command",
+					"device", devicePath, "mount_point", m.MountPoint, "source", m.Source,
+					"error", merr, "output", strings.TrimSpace(string(out)))
+				continue
+			}
+			h.logger.Info("restored a recovery-bootstrap mount after a refused command",
+				"device", devicePath, "mount_point", m.MountPoint, "source", m.Source)
+		}
 	}
 
 	var failures []string
@@ -70,12 +92,13 @@ func (h *CommandHandler) releaseBootMediaMounts(devicePath string) (released, la
 			lazy = append(lazy, m.MountPoint)
 		}
 		released = append(released, m.MountPoint)
+		detached = append(detached, m)
 		h.logger.Info("released a recovery-bootstrap mount on the target device",
 			"device", devicePath, "mount_point", m.MountPoint, "source", m.Source)
 	}
 
 	if len(failures) > 0 {
-		return released, lazy, fmt.Errorf("could not release %s", strings.Join(failures, "; "))
+		return released, lazy, restore, fmt.Errorf("could not release %s", strings.Join(failures, "; "))
 	}
-	return released, lazy, nil
+	return released, lazy, restore, nil
 }

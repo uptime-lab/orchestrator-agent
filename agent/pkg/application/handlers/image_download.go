@@ -190,3 +190,33 @@ func (h *CommandHandler) invalidateTargetDevice(deviceFile *os.File, targetDevic
 	h.logger.Warn("target device deliberately invalidated after a failed install",
 		"device", targetDevice, "written_bytes", writtenBytes)
 }
+
+// prepareOnFirstRead runs prepare exactly once, when the image stream first
+// delivers bytes and before any of them is handed on. Clearing the target —
+// wipefs, the zeroed partition table — is what makes the previous system
+// unbootable, so it waits until the download has actually started: a request
+// refused outright, a missing image or a stream whose compressed header does
+// not decode leaves the previous system on the disk as it was.
+type prepareOnFirstRead struct {
+	r        io.Reader
+	prepare  func() error
+	prepared bool
+}
+
+func newPrepareOnFirstRead(r io.Reader, prepare func() error) *prepareOnFirstRead {
+	return &prepareOnFirstRead{r: r, prepare: prepare}
+}
+
+func (p *prepareOnFirstRead) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 && !p.prepared {
+		p.prepared = true
+		if perr := p.prepare(); perr != nil {
+			return 0, perr
+		}
+	}
+	return n, err
+}
+
+// Prepared reports whether the target has been touched.
+func (p *prepareOnFirstRead) Prepared() bool { return p.prepared }

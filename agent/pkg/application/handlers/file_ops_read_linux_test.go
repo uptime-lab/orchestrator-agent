@@ -132,7 +132,7 @@ func TestTheWriteListKeepsItsOwnEntries(t *testing.T) {
 	h := &CommandHandler{}
 	for _, path := range []string{
 		"/etc/ssh/authorized_keys.d/deploy",
-		"/etc/sudoers.d/orchestrator-deploy",
+		"/" + accessSudoersPrefix + "deploy",
 	} {
 		if _, err := h.resolveForFileOp(path, ""); err == nil {
 			t.Errorf("%s must stay refused for writes", path)

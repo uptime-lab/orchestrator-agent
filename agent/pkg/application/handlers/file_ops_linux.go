@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"agent/pkg/domain/refusal"
 	proto "agent/pkg/infrastructure/grpc/proto"
 )
 
@@ -32,56 +33,12 @@ import (
 // device must not depend on the platform bounding the device's own memory.
 const DefaultReadMaxBytes = 512 * 1024
 
-// protectedFiles are files this agent refuses to delete, whatever the platform
-// says. Losing any of them strands the device: no boot, no login, or no way for
-// the platform to reach it again. The backend keeps the same list; this copy is
-// the one that still holds when a backend path forgets to check.
-var protectedFiles = []string{
-	"/boot/firmware/config.txt",
-	"/boot/config.txt",
-	"/boot/firmware/cmdline.txt",
-	"/etc/watchdog.conf",
-	"/etc/systemd/system.conf.d/10-orchestrator-watchdog.conf",
-	"/etc/systemd/system/orchestrator-agent.service",
-	"/lib/systemd/system/orchestrator-agent.service",
-	"/usr/bin/orchestrator-agent",
-	"/usr/local/bin/orchestrator-agent",
-	"/etc/machine-id",
-	"/etc/fstab",
-	"/etc/passwd",
-	"/etc/shadow",
-	"/etc/gshadow",
-	"/etc/sudoers",
-	"/etc/group",
-}
-
-// protectedPrefixes is the WRITE and DELETE side of the path policy. It must
-// stay in step with the read side's refused prefixes (see refusedReadPrefixes),
-// and it did not: reads refused six kernel/runtime prefixes while writes and
-// deletes refused three. The backend grew /var/run and /var/lock; the agent's
-// write side never followed.
-//
-// Refusing a write under /run is not pedantry. /run holds pid files, sockets and
-// the systemd runtime tree; writing there through a platform command can wedge
-// services that are mid-flight, and unlike /etc there is no versioned copy to
-// restore from because the whole tree is a tmpfs that exists only until reboot.
-var protectedPrefixes = []string{
-	"/etc/ssh/authorized_keys.d/",
-	"/etc/sudoers.d/orchestrator",
-	"/proc/",
-	"/sys/",
-	"/dev/",
-	"/run/",
-	"/var/run/",
-	"/var/lock/",
-}
-
 // refusedReadPrefixes is the read side of the same rule. Declared once and
 // shared, because the two lists drifting apart is exactly what C-8 was: a single
 // list means a new prefix cannot be added to one half only.
 //
-// The read side is a SUPERSET only in wording: /etc/ssh/authorized_keys.d and
-// /etc/sudoers.d/orchestrator are editable-but-protected files that reads are
+// The read side is a SUPERSET only in wording: the access reconciler's key,
+// principal and sudoers files are editable-but-protected files that reads are
 // allowed to see, so they belong to the write list alone.
 var refusedReadPrefixes = []string{
 	"/proc/",
@@ -98,7 +55,10 @@ var refusedReadPrefixes = []string{
 // The parent directory is resolved with EvalSymlinks before the check: a plain
 // string comparison is defeated by a symlinked parent (/opt/app/etc -> /etc) or
 // a bind mount, both of which name a protected file without looking like one.
-func (h *CommandHandler) resolveForFileOp(path string, adoptionFile string) (string, error) {
+//
+// Every error it returns is a refusal: the path policy turned the command away.
+func (h *CommandHandler) resolveForFileOp(path string, adoptionFile string) (_ string, err error) {
+	defer func() { err = refusal.Wrap(err) }()
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
@@ -197,7 +157,10 @@ func looksLikeSSHPrivateKey(path string) bool {
 // straight through, so a directory link was enough to hand back the adoption
 // file. The backend's path policy was the only thing in the way, and the agent
 // must not depend on its caller for that.
-func (h *CommandHandler) resolveForFileRead(path string, adoptionFile string) (string, error) {
+//
+// Every error it returns is a refusal, as for resolveForFileOp.
+func (h *CommandHandler) resolveForFileRead(path string, adoptionFile string) (_ string, err error) {
+	defer func() { err = refusal.Wrap(err) }()
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
@@ -249,31 +212,6 @@ func (h *CommandHandler) resolveForFileRead(path string, adoptionFile string) (s
 		}
 	}
 	return resolved, nil
-}
-
-// checkProtectedNames is the name-based half of the check. Case-insensitive on
-// purpose: the boot partition is vfat, where CONFIG.TXT and config.txt are one
-// file.
-func checkProtectedNames(candidate, adoptionFile string) error {
-	if adoptionFile != "" && strings.EqualFold(candidate, filepath.Clean(adoptionFile)) {
-		return fmt.Errorf("%s is this node's adoption file", candidate)
-	}
-	for _, p := range protectedFiles {
-		if strings.EqualFold(candidate, p) {
-			return fmt.Errorf("%s is managed by the platform and cannot be modified by this command", candidate)
-		}
-	}
-	for _, prefix := range protectedPrefixes {
-		// The directory ITSELF is protected too, not only what is under it:
-		// an ownership walk that chowned /etc/ssh/authorized_keys.d to an
-		// archive's owner would make sshd's StrictModes refuse every key in
-		// it — the platform's own login path.
-		if strings.HasPrefix(strings.ToLower(candidate), strings.ToLower(prefix)) ||
-			strings.EqualFold(candidate, strings.TrimSuffix(prefix, "/")) {
-			return fmt.Errorf("%s is under %s, which this command may not touch", candidate, strings.TrimSuffix(prefix, "/"))
-		}
-	}
-	return nil
 }
 
 // protectedAncestors is every PROPER ancestor of a protected name — of the

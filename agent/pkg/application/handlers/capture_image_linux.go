@@ -72,9 +72,10 @@ func (h *CommandHandler) handleCaptureImage(commandID string, cmd *proto.Capture
 		return fmt.Errorf("%s", msg)
 	}
 
-	targetDevice := strings.TrimSpace(cmd.TargetDevice)
-	if targetDevice == "" {
-		targetDevice = "/dev/nvme0n1"
+	targetDevice, err := captureTargetDevice(cmd.TargetDevice)
+	if err != nil {
+		h.reportCommandStatus(commandID, "failed", 0, err.Error())
+		return err
 	}
 	if _, err := os.Stat(targetDevice); err != nil {
 		return h.failCapture(commandID, fmt.Sprintf("target device %s not found: %v", targetDevice, err))

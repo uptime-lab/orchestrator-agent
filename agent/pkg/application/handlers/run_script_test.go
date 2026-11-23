@@ -9,8 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"agent/pkg/domain/refusal"
 )
 
 // The script body carries resolved secrets; argv is world-readable through
@@ -91,5 +96,65 @@ func TestRunScriptKeepsExitStatusAndEmptyStdin(t *testing.T) {
 	}
 	if got := stdout.String(); got != "[]" {
 		t.Fatalf("the script read %q from stdin, want nothing", got)
+	}
+}
+
+// A NUL byte cannot be part of a shell script: the shells either stop reading
+// at it or drop it, so the device would run something other than what the
+// operator wrote. The body is refused before anything is staged, as a refusal
+// (the command was turned away, nothing ran).
+func TestRunScriptRefusesANulByte(t *testing.T) {
+	parent := t.TempDir()
+	runScriptParentDirs = []string{parent}
+	t.Cleanup(func() { runScriptParentDirs = []string{"/run", ""} })
+
+	cmd, cleanup, err := newScriptCommand(context.Background(), "echo one\x00echo two\n")
+	defer cleanup()
+	if err == nil {
+		t.Fatalf("a script with a NUL byte was accepted: %q", cmd.Args)
+	}
+	if !refusal.Is(err) {
+		t.Errorf("err = %v, want a refusal", err)
+	}
+	if entries, _ := os.ReadDir(parent); len(entries) != 0 {
+		t.Errorf("a refused script left %d staged entries behind", len(entries))
+	}
+}
+
+// A timeout or a cancel ends the WHOLE script, not only the shell: a command
+// the script started (a package install, a hung download) would otherwise
+// carry on as root, re-parented to init, after the run was reported as timed
+// out — holding the package lock, or running twice when the step is retried.
+func TestRunScriptCancelKillsTheScriptsChildren(t *testing.T) {
+	runScriptParentDirs = []string{t.TempDir()}
+	t.Cleanup(func() { runScriptParentDirs = []string{"/run", ""} })
+
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd, cleanup, err := newScriptCommand(ctx,
+		"sleep 37 &\necho $! > '"+pidFile+"'\nwait\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	cmd.WaitDelay = time.Second
+	_ = cmd.Run()
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("the script never recorded its child: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	deadline := time.Now().Add(3 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("the script's child %d survived the timeout", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

@@ -22,3 +22,25 @@ func setHostnameRejection(name string) string {
 	}
 	return "invalid hostname (must be an RFC 1123 label: a-z, 0-9, '-', up to 63 chars)"
 }
+
+// etcHostsWithHostname returns /etc/hosts content with every 127.0.1.1 line
+// mapping name, appending one when there is none. Every line of the result
+// ends in a newline, including one whose original lacked it, so applying the
+// same name again returns the content unchanged.
+func etcHostsWithHostname(content, name string) string {
+	var lines []string
+	if content != "" {
+		lines = strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+	}
+	found := false
+	for i, ln := range lines {
+		if fields := strings.Fields(ln); len(fields) >= 1 && fields[0] == "127.0.1.1" {
+			lines[i] = "127.0.1.1\t" + name
+			found = true
+		}
+	}
+	if !found {
+		lines = append(lines, "127.0.1.1\t"+name)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}

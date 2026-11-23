@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -248,6 +249,28 @@ func wouldLockOutAllAccess(spec accessConfigSpec) bool {
 		}
 	}
 	return true
+}
+
+// adoptionLockRefusal refuses an apply that would adopt an existing account
+// (adopting: the users outside the managed group that this apply takes over)
+// and lock it in the same step, because the entry gives it no key and no
+// password. The lock clears the account's password for good, expires it and
+// ends its sessions, so the account someone was using stops working. The
+// whole-node gate cannot see this: it assumes an account the platform does not
+// manage keeps working, which is untrue for the one this apply adopts.
+func adoptionLockRefusal(spec accessConfigSpec, adopting []string) error {
+	var lockedOnAdoption []string
+	for _, u := range spec.Users {
+		if u.Locked() && slices.Contains(adopting, u.Username) {
+			lockedOnAdoption = append(lockedOnAdoption, u.Username)
+		}
+	}
+	if len(lockedOnAdoption) == 0 {
+		return nil
+	}
+	return fmt.Errorf("would_lock_out_adopted_account: adopting %s with no key and no password "+
+		"would clear its password, lock it and end its sessions; give the entry a key first",
+		strings.Join(lockedOnAdoption, ", "))
 }
 
 // sshdDropInContent renders the sshd settings we own. Rewritten wholesale from
