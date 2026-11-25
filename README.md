@@ -22,11 +22,10 @@ into the agent and watcher (the packages install the same three files under
   sign the packages offline with a hardware-held key and attach them by hand.
   A Go-valid `agent/v<version>` tag is added only once the module path is
   canonical.
-- **Building**: `cd agent && go build ./cmd/agent` works from a clone; `go get`
-  of the module path resolves only once the main repository is public.
+- **Building**: `cd agent && go build ./cmd/agent` works from a clone. The
+  module path is not a canonical one yet, so `go get` does not resolve it.
 - **Issues and pull requests**: this mirror accepts neither. Bugs and patches
-  go to the main repository once it is public; until then, to the public
-  tracker `uptime-lab/orchestrator-tracker`.
+  go to the main repository, `uptime-lab/orchestrator`.
 - **Design documents** the code cites (`docs/NETWORK-FIRST.md`,
   `docs/UTILITIES-PLAN.md`, `docs/UTILITIES-RESEARCH.md`,
   `docs/HTTPBOOT-AUTH-RESEARCH.md`) live in the main repository.
